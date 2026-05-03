@@ -24,7 +24,25 @@
     <div id="new-session-dialog">
       <h3>New Session</h3>
       <label>Name <input type="text" id="dialog-name" placeholder="optional"></label>
-      <label>Working Directory <input type="text" id="dialog-cwd" placeholder="current directory"></label>
+      <label>Working Directory
+        <div class="cwd-row">
+          <input type="text" id="dialog-cwd" placeholder="current directory">
+          <button type="button" id="dialog-browse" title="Browse...">&#128193;</button>
+        </div>
+      </label>
+
+      <!-- Directory Browser Panel -->
+      <div id="dir-browser" class="hidden">
+        <div class="dir-browser-header">
+          <span id="dir-browser-path"></span>
+          <button type="button" id="dir-browser-up" title="Parent directory">&#8593;</button>
+        </div>
+        <div id="dir-browser-list"></div>
+        <div class="dir-browser-buttons">
+          <button type="button" id="dir-browser-cancel">Cancel</button>
+          <button type="button" id="dir-browser-select">Select</button>
+        </div>
+      </div>
       <label>Command <input type="text" id="dialog-cmd" value="claude --dangerously-skip-permissions"></label>
       <div class="dialog-buttons">
         <button id="dialog-cancel">Cancel</button>

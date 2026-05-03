@@ -6,6 +6,11 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,6 +206,73 @@ func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
 		sendInitialState(client, mgr)
 
 		client.readPump(hub, mgr)
+	})
+
+	// Directory listing API for the browse dialog.
+	mux.HandleFunc("/api/browse", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		reqPath := r.URL.Query().Get("path")
+		if reqPath == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				home = "."
+			}
+			reqPath = home
+		}
+
+		absPath, err := filepath.Abs(reqPath)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		entries, err := os.ReadDir(absPath)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		type DirEntry struct {
+			Name  string `json:"name"`
+			IsDir bool   `json:"isDir"`
+		}
+
+		var dirs []DirEntry
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			if e.IsDir() {
+				dirs = append(dirs, DirEntry{Name: e.Name(), IsDir: true})
+			}
+		}
+		sort.Slice(dirs, func(i, j int) bool {
+			return strings.ToLower(dirs[i].Name) < strings.ToLower(dirs[j].Name)
+		})
+
+		// Build list of drive letters on Windows for root navigation.
+		var drives []string
+		if runtime.GOOS == "windows" && (absPath == filepath.VolumeName(absPath)+string(filepath.Separator) || absPath == filepath.VolumeName(absPath)) {
+			for c := 'A'; c <= 'Z'; c++ {
+				drive := string(c) + ":\\"
+				if _, err := os.Stat(drive); err == nil {
+					drives = append(drives, drive)
+				}
+			}
+		}
+
+		parent := filepath.Dir(absPath)
+		if parent == absPath {
+			parent = ""
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"path":    absPath,
+			"parent":  parent,
+			"entries": dirs,
+			"drives":  drives,
+		})
 	})
 
 	sub, err := fs.Sub(webFS, "web")

@@ -128,6 +128,40 @@ function createTerminal(id) {
     console.warn('WebGL renderer failed, using default:', e);
   }
 
+  // Ctrl+C: copy selection instead of sending SIGINT when text is selected.
+  // Ctrl+V: read clipboard and paste into terminal.
+  // When nothing is selected, Ctrl+C passes through as normal (SIGINT).
+  term.attachCustomKeyEventHandler(function(e) {
+    if (e.type !== 'keydown') return true;
+
+    // Ctrl+C with selection → copy
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C') && term.hasSelection()) {
+      e.preventDefault();
+      var text = term.getSelection();
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).catch(function(err) {
+          console.error('clipboard write failed:', err);
+        });
+      }
+      return false;
+    }
+
+    // Ctrl+V → paste from clipboard
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      if (navigator.clipboard) {
+        navigator.clipboard.readText().then(function(text) {
+          if (text) term.paste(text);
+        }).catch(function(err) {
+          console.error('clipboard read failed:', err);
+        });
+      }
+      return false;
+    }
+
+    return true;
+  });
+
   terminals[id] = { term: term, fitAddon: fitAddon, el: null, wrapper: wrapper };
 }
 
@@ -316,6 +350,7 @@ function showNewSessionDialog() {
 }
 
 function hideNewSessionDialog() {
+  closeDirBrowser();
   document.getElementById('dialog-overlay').classList.add('hidden');
 }
 
@@ -326,6 +361,81 @@ function createSessionFromDialog() {
 
   send({ type: 'spawn', cmd: cmd, cwd: cwd, name: name });
   hideNewSessionDialog();
+}
+
+// Directory Browser
+var dirBrowserPath = '';
+var dirBrowserParent = '';
+
+function openDirBrowser() {
+  var startPath = document.getElementById('dialog-cwd').value.trim() || '';
+  document.getElementById('dir-browser').classList.remove('hidden');
+  fetchDirectory(startPath);
+}
+
+function closeDirBrowser() {
+  document.getElementById('dir-browser').classList.add('hidden');
+}
+
+function fetchDirectory(path) {
+  var url = '/api/browse';
+  if (path) url += '?path=' + encodeURIComponent(path);
+
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        console.error('browse error:', data.error);
+        return;
+      }
+      dirBrowserPath = data.path;
+      dirBrowserParent = data.parent;
+
+      document.getElementById('dir-browser-path').textContent = data.path;
+
+      var list = document.getElementById('dir-browser-list');
+      list.innerHTML = '';
+
+      // Show drive letters at root on Windows
+      if (data.drives && data.drives.length > 0) {
+        data.drives.forEach(function(drive) {
+          var el = document.createElement('div');
+          el.className = 'dir-entry drive';
+          el.textContent = drive;
+          el.addEventListener('click', function() {
+            fetchDirectory(drive);
+          });
+          list.appendChild(el);
+        });
+      }
+
+      var entries = data.entries || [];
+      entries.forEach(function(entry) {
+        var el = document.createElement('div');
+        el.className = 'dir-entry';
+        el.textContent = '\uD83D\uDCC1 ' + entry.name;
+        el.addEventListener('click', function() {
+          fetchDirectory(dirBrowserPath + '\\' + entry.name);
+        });
+        list.appendChild(el);
+      });
+
+      if (entries.length === 0 && (!data.drives || data.drives.length === 0)) {
+        var empty = document.createElement('div');
+        empty.className = 'dir-entry';
+        empty.style.color = 'var(--text-dim)';
+        empty.textContent = '(no subdirectories)';
+        list.appendChild(empty);
+      }
+    })
+    .catch(function(err) {
+      console.error('browse fetch error:', err);
+    });
+}
+
+function selectDirBrowser() {
+  document.getElementById('dialog-cwd').value = dirBrowserPath;
+  closeDirBrowser();
 }
 
 // Context Menu
@@ -463,6 +573,12 @@ function handleResize() {
 function init() {
   document.getElementById('dialog-create').addEventListener('click', createSessionFromDialog);
   document.getElementById('dialog-cancel').addEventListener('click', hideNewSessionDialog);
+  document.getElementById('dialog-browse').addEventListener('click', openDirBrowser);
+  document.getElementById('dir-browser-up').addEventListener('click', function() {
+    if (dirBrowserParent) fetchDirectory(dirBrowserParent);
+  });
+  document.getElementById('dir-browser-cancel').addEventListener('click', closeDirBrowser);
+  document.getElementById('dir-browser-select').addEventListener('click', selectDirBrowser);
   document.getElementById('dialog-overlay').addEventListener('click', function(e) {
     if (e.target === this) hideNewSessionDialog();
   });
