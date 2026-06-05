@@ -6,6 +6,9 @@ let activeSession = null;
 let mode = 'grid';
 let contextMenuTarget = null;
 
+// Default working directory for new sessions
+var DEFAULT_CWD = 'C:\\Users\\Danny\\OneDrive\\Desktop';
+
 // WebSocket
 function connect() {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -344,7 +347,7 @@ function switchToGrid() {
 function showNewSessionDialog() {
   document.getElementById('dialog-overlay').classList.remove('hidden');
   document.getElementById('dialog-name').value = '';
-  document.getElementById('dialog-cwd').value = '';
+  document.getElementById('dialog-cwd').value = DEFAULT_CWD;
   document.getElementById('dialog-cmd').value = 'claude --dangerously-skip-permissions';
   document.getElementById('dialog-name').focus();
 }
@@ -595,6 +598,12 @@ function init() {
       var action = this.dataset.action;
       if (action === 'kill' && contextMenuTarget) {
         send({ type: 'kill', session: contextMenuTarget });
+      }
+      if (action === 'remove' && contextMenuTarget) {
+        send({ type: 'remove', session: contextMenuTarget });
+        if (activeSession === contextMenuTarget) {
+          activeSession = sessions.length > 1 ? sessions.find(function(s) { return s.id !== contextMenuTarget; }).id : null;
+        }
       }
       if (action === 'rename' && contextMenuTarget) {
         var nameEl = document.querySelector('[data-session="' + contextMenuTarget + '"] .name');

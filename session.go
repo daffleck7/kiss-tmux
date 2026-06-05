@@ -256,6 +256,35 @@ func (m *Manager) Kill(id string) {
 	}
 }
 
+func (m *Manager) Remove(id string) {
+	v, ok := m.sessions.Load(id)
+	if !ok {
+		return
+	}
+	s := v.(*Session)
+	s.mu.Lock()
+	wasRunning := s.Running
+	s.Running = false
+	s.mu.Unlock()
+
+	if wasRunning {
+		s.cpty.Close()
+	}
+
+	m.sessions.Delete(id)
+
+	m.orderMu.Lock()
+	for i, oid := range m.order {
+		if oid == id {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
+	m.orderMu.Unlock()
+
+	m.broadcastSessions()
+}
+
 func (m *Manager) Rename(id, name string) {
 	v, ok := m.sessions.Load(id)
 	if !ok {

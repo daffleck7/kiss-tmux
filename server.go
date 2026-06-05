@@ -159,6 +159,8 @@ func (c *Client) readPump(hub *Hub, mgr *Manager) {
 			mgr.Kill(msg.Session)
 		case "rename":
 			mgr.Rename(msg.Session, msg.Name)
+		case "remove":
+			mgr.Remove(msg.Session)
 		case "list":
 			sessMsg := mgr.SessionsMessage()
 			if data, err := json.Marshal(sessMsg); err == nil {
