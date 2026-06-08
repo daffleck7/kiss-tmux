@@ -6,8 +6,15 @@ let activeSession = null;
 let mode = 'grid';
 let contextMenuTarget = null;
 
-// Default working directory for new sessions
-var DEFAULT_CWD = 'C:\\Users\\Danny\\OneDrive\\Desktop';
+// Default working directory for new sessions (loaded from server config)
+var DEFAULT_CWD = '';
+
+// Load config from server
+fetch('/api/config')
+  .then(function(r) { return r.json(); })
+  .then(function(cfg) {
+    if (cfg.default_cwd) DEFAULT_CWD = cfg.default_cwd;
+  });
 
 // WebSocket
 function connect() {

@@ -187,8 +187,35 @@ func sendInitialState(client *Client, mgr *Manager) {
 	}
 }
 
+// AppConfig holds user-configurable settings loaded from config.json.
+type AppConfig struct {
+	DefaultCwd string `json:"default_cwd"`
+}
+
+func loadConfig() AppConfig {
+	var cfg AppConfig
+
+	exePath, err := os.Executable()
+	if err == nil {
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(exePath), "config.json"))
+		if err == nil {
+			json.Unmarshal(data, &cfg)
+		}
+	}
+
+	if cfg.DefaultCwd == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			cfg.DefaultCwd = home
+		}
+	}
+
+	return cfg
+}
+
 func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
 	mux := http.NewServeMux()
+	cfg := loadConfig()
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -208,6 +235,12 @@ func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
 		sendInitialState(client, mgr)
 
 		client.readPump(hub, mgr)
+	})
+
+	// Config endpoint so the frontend can read user settings.
+	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cfg)
 	})
 
 	// Directory listing API for the browse dialog.
