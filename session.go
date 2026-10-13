@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/UserExistsError/conpty"
 )
 
 // RingBuffer is a fixed-size circular byte buffer for reconnect replay.
@@ -75,46 +77,100 @@ func genID() string {
 	return hex.EncodeToString(b)
 }
 
+// Session is one terminal: a local process, or an SSH attachment to a remote cs session.
 type Session struct {
-	ID      string
-	Name    string
-	Cmd     string
-	Cwd     string
-	Running bool
-	cpty    *conpty.ConPty
-	buf     *RingBuffer
-	mu      sync.Mutex
+	ID         string
+	Name       string
+	Cmd        string
+	Cwd        string
+	Host       string // "" for local; immutable after creation
+	RemoteName string // cs/screen name for remote sessions; immutable
+	Running    bool
+	State      string
+	cpty       ptyProc
+	buf        *RingBuffer
+	mu         sync.Mutex
+
+	cols, rows          uint16
+	disconnectRequested bool
+	endRequested        bool
+	removed             bool
+	connectedAt         time.Time
+	backoff             *Backoff
+	reconnectGen        int
 }
 
+// Manager owns all sessions and their lifecycles.
 type Manager struct {
 	sessions    sync.Map
 	order       []string
 	orderMu     sync.Mutex
 	broadcast   func([]byte)
 	maxSessions int
+
+	hosts      map[string]HostConfig
+	startPty   ptyStarter
+	runSSH     sshRunner
+	sleep      func(time.Duration)
+	remoteMu   sync.Mutex // serializes find-then-create of remote sessions
+	discoverMu sync.Mutex
+
+	hostErrMu sync.Mutex
+	hostErr   map[string]string // last discovery error per host, replayed to new clients
 }
 
+// NewManager creates a Manager allowing maxSessions per machine.
 func NewManager(maxSessions int, broadcast func([]byte)) *Manager {
 	return &Manager{
 		broadcast:   broadcast,
 		maxSessions: maxSessions,
+		hosts:       map[string]HostConfig{},
+		hostErr:     map[string]string{},
+		startPty:    startConPty,
+		runSSH:      runSSHCommand,
+		sleep:       time.Sleep,
 	}
 }
 
-func (m *Manager) sessionCount() int {
+// SetHosts registers the remote machines from config. Call before serving.
+func (m *Manager) SetHosts(hosts []HostConfig) {
+	m.hosts = make(map[string]HostConfig, len(hosts))
+	for _, h := range hosts {
+		m.hosts[h.ID] = h
+	}
+}
+
+func (m *Manager) get(id string) *Session {
+	v, ok := m.sessions.Load(id)
+	if !ok {
+		return nil
+	}
+	return v.(*Session)
+}
+
+func (m *Manager) store(s *Session) {
+	m.sessions.Store(s.ID, s)
+	m.orderMu.Lock()
+	m.order = append(m.order, s.ID)
+	m.orderMu.Unlock()
+}
+
+func (m *Manager) hostSessionCount(host string) int {
 	count := 0
-	m.sessions.Range(func(_, _ interface{}) bool {
-		count++
+	m.sessions.Range(func(_, v interface{}) bool {
+		if v.(*Session).Host == host {
+			count++
+		}
 		return true
 	})
 	return count
 }
 
+// Spawn starts a local session running cmd.
 func (m *Manager) Spawn(cmd, cwd, name string, cols, rows uint16) (string, error) {
-	if m.sessionCount() >= m.maxSessions {
+	if m.hostSessionCount("") >= m.maxSessions {
 		return "", errors.New("max sessions reached")
 	}
-
 	if cmd == "" {
 		cmd = "claude --dangerously-skip-permissions"
 	}
@@ -125,14 +181,7 @@ func (m *Manager) Spawn(cmd, cwd, name string, cols, rows uint16) (string, error
 		rows = 24
 	}
 
-	opts := []conpty.ConPtyOption{
-		conpty.ConPtyDimensions(int(cols), int(rows)),
-	}
-	if cwd != "" {
-		opts = append(opts, conpty.ConPtyWorkDir(cwd))
-	}
-
-	cpty, err := conpty.Start(cmd, opts...)
+	p, err := m.startPty(cmd, cwd, cols, rows)
 	if err != nil {
 		return "", err
 	}
@@ -141,32 +190,32 @@ func (m *Manager) Spawn(cmd, cwd, name string, cols, rows uint16) (string, error
 	if name == "" {
 		name = cmd
 	}
-
 	s := &Session{
 		ID:      id,
 		Name:    name,
 		Cmd:     cmd,
 		Cwd:     cwd,
 		Running: true,
-		cpty:    cpty,
+		State:   stateRunning,
+		cpty:    p,
 		buf:     NewRingBuffer(65536),
+		cols:    cols,
+		rows:    rows,
 	}
+	m.store(s)
 
-	m.sessions.Store(id, s)
-	m.orderMu.Lock()
-	m.order = append(m.order, id)
-	m.orderMu.Unlock()
-
-	go m.readLoop(s)
+	go m.readLoop(s, p)
 
 	m.broadcastSessions()
 	return id, nil
 }
 
-func (m *Manager) readLoop(s *Session) {
+// readLoop pumps output from p until it closes. p is passed explicitly because a
+// remote session swaps in a new PTY on reconnect.
+func (m *Manager) readLoop(s *Session, p ptyProc) {
 	buf := make([]byte, 4096)
 	for {
-		n, err := s.cpty.Read(buf)
+		n, err := p.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
@@ -182,26 +231,51 @@ func (m *Manager) readLoop(s *Session) {
 			break
 		}
 	}
-
-	s.mu.Lock()
-	s.Running = false
-	s.mu.Unlock()
-
-	exitMsg := ServerMsg{Type: "exited", Session: s.ID, Code: 0}
-	if encoded, err := json.Marshal(exitMsg); err == nil {
-		m.broadcast(encoded)
-	}
-	m.broadcastSessions()
+	m.onPtyEnd(s)
 }
 
+// onPtyEnd moves a session to its post-exit state and starts reconnecting if needed.
+func (m *Manager) onPtyEnd(s *Session) {
+	s.mu.Lock()
+	s.Running = false
+	if s.removed {
+		s.mu.Unlock()
+		return
+	}
+	next := stateAfterExit(s.Host != "", s.disconnectRequested, s.endRequested)
+	s.State = next
+	gen := 0
+	if next == stateReconnecting {
+		if time.Since(s.connectedAt) >= stableConnection {
+			s.backoff.Reset()
+		}
+		s.reconnectGen++
+		gen = s.reconnectGen
+	}
+	s.mu.Unlock()
+
+	if s.Host == "" {
+		exitMsg := ServerMsg{Type: "exited", Session: s.ID, Code: 0}
+		if encoded, err := json.Marshal(exitMsg); err == nil {
+			m.broadcast(encoded)
+		}
+	}
+	m.broadcastSessions()
+
+	if next == stateReconnecting {
+		go m.reconnectLoop(s, gen, false)
+	}
+}
+
+// Input writes keyboard data to a running session in small chunks.
 func (m *Manager) Input(id, data string) error {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return errors.New("session not found")
 	}
-	s := v.(*Session)
 	s.mu.Lock()
 	running := s.Running
+	p := s.cpty
 	s.mu.Unlock()
 	if !running {
 		return errors.New("session not running")
@@ -214,7 +288,7 @@ func (m *Manager) Input(id, data string) error {
 		if n > len(b) {
 			n = len(b)
 		}
-		if _, err := s.cpty.Write(b[:n]); err != nil {
+		if _, err := p.Write(b[:n]); err != nil {
 			return err
 		}
 		b = b[n:]
@@ -225,50 +299,61 @@ func (m *Manager) Input(id, data string) error {
 	return nil
 }
 
+// Resize records the terminal size and applies it if the session is running.
 func (m *Manager) Resize(id string, cols, rows uint16) error {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return errors.New("session not found")
 	}
-	s := v.(*Session)
 	s.mu.Lock()
+	s.cols, s.rows = cols, rows
 	running := s.Running
+	p := s.cpty
 	s.mu.Unlock()
 	if !running {
 		return nil
 	}
-	return s.cpty.Resize(int(cols), int(rows))
+	return p.Resize(int(cols), int(rows))
 }
 
+// Kill stops a local session. For remote sessions it only disconnects.
 func (m *Manager) Kill(id string) {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return
 	}
-	s := v.(*Session)
+	if s.Host != "" {
+		m.Disconnect(id)
+		return
+	}
 	s.mu.Lock()
 	wasRunning := s.Running
 	s.Running = false
+	s.State = stateExited
+	p := s.cpty
 	s.mu.Unlock()
 
 	if wasRunning {
-		s.cpty.Close()
+		p.Close()
 	}
 }
 
+// Remove stops a session (remote: disconnects only) and drops it from the list.
 func (m *Manager) Remove(id string) {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return
 	}
-	s := v.(*Session)
 	s.mu.Lock()
 	wasRunning := s.Running
 	s.Running = false
+	s.removed = true
+	s.reconnectGen++
+	p := s.cpty
 	s.mu.Unlock()
 
 	if wasRunning {
-		s.cpty.Close()
+		p.Close()
 	}
 
 	m.sessions.Delete(id)
@@ -285,18 +370,19 @@ func (m *Manager) Remove(id string) {
 	m.broadcastSessions()
 }
 
+// Rename changes a session's display name.
 func (m *Manager) Rename(id, name string) {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return
 	}
-	s := v.(*Session)
 	s.mu.Lock()
 	s.Name = name
 	s.mu.Unlock()
 	m.broadcastSessions()
 }
 
+// List returns all sessions in creation order.
 func (m *Manager) List() []SessionInfo {
 	m.orderMu.Lock()
 	order := make([]string, len(m.order))
@@ -305,17 +391,19 @@ func (m *Manager) List() []SessionInfo {
 
 	var result []SessionInfo
 	for _, id := range order {
-		v, ok := m.sessions.Load(id)
-		if !ok {
+		s := m.get(id)
+		if s == nil {
 			continue
 		}
-		s := v.(*Session)
 		s.mu.Lock()
 		info := SessionInfo{
-			ID:      s.ID,
-			Name:    s.Name,
-			Cmd:     s.Cmd,
-			Running: s.Running,
+			ID:         s.ID,
+			Name:       s.Name,
+			Cmd:        s.Cmd,
+			Running:    s.Running,
+			Host:       s.Host,
+			State:      s.State,
+			RemoteName: s.RemoteName,
 		}
 		s.mu.Unlock()
 		result = append(result, info)
@@ -323,12 +411,13 @@ func (m *Manager) List() []SessionInfo {
 	return result
 }
 
+// Replay returns the buffered output for a session.
 func (m *Manager) Replay(id string) []byte {
-	v, ok := m.sessions.Load(id)
-	if !ok {
+	s := m.get(id)
+	if s == nil {
 		return nil
 	}
-	return v.(*Session).buf.Bytes()
+	return s.buf.Bytes()
 }
 
 func (m *Manager) SessionsMessage() ServerMsg {
@@ -340,4 +429,431 @@ func (m *Manager) broadcastSessions() {
 	if encoded, err := json.Marshal(msg); err == nil {
 		m.broadcast(encoded)
 	}
+}
+
+// Sentinel errors from spawnRemoteSession, wrapped with context.
+var (
+	errSessionOpen = errors.New("session already open")
+	errMaxSessions = errors.New("max sessions reached")
+)
+
+// SpawnRemote opens a new cs session called name (slugified) on hostID in cwd.
+func (m *Manager) SpawnRemote(hostID, name, cwd string, cols, rows uint16) (string, error) {
+	host, ok := m.hosts[hostID]
+	if !ok {
+		return "", fmt.Errorf("unknown host %q", hostID)
+	}
+	displayName := strings.TrimSpace(name)
+	if strings.TrimSpace(cwd) == "" {
+		cwd = host.DefaultCwd
+	}
+	return m.spawnRemoteSession(host, slugRemoteName(name), displayName, cwd, cols, rows)
+}
+
+// spawnRemoteSession attaches to (or creates) remoteName on host and registers it.
+// An empty remoteName gets a generated one.
+func (m *Manager) spawnRemoteSession(host HostConfig, remoteName, displayName, cwd string, cols, rows uint16) (string, error) {
+	m.remoteMu.Lock()
+	defer m.remoteMu.Unlock()
+
+	if m.hostSessionCount(host.ID) >= m.maxSessions {
+		return "", fmt.Errorf("%w on %s", errMaxSessions, host.Label)
+	}
+	id := genID()
+	if remoteName == "" {
+		remoteName = "s" + id
+	}
+	if !validRemoteName(remoteName) {
+		return "", fmt.Errorf("invalid session name %q (use letters, numbers, - or _)", remoteName)
+	}
+	if m.findRemote(host.ID, remoteName) != nil {
+		return "", fmt.Errorf("%w: %q on %s", errSessionOpen, remoteName, host.Label)
+	}
+	if displayName == "" {
+		displayName = remoteName
+	}
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+
+	s := &Session{
+		ID:         id,
+		Name:       displayName,
+		Cmd:        "cs " + remoteName,
+		Cwd:        cwd,
+		Host:       host.ID,
+		RemoteName: remoteName,
+		State:      stateReconnecting,
+		buf:        NewRingBuffer(65536),
+		cols:       cols,
+		rows:       rows,
+		backoff:    newBackoff(),
+	}
+	if err := m.attach(s, host, cwd, 0); err != nil {
+		return "", err
+	}
+	m.store(s)
+	m.broadcastSessions()
+	return id, nil
+}
+
+// findRemote returns the session for (hostID, remoteName), if open.
+func (m *Manager) findRemote(hostID, remoteName string) *Session {
+	var found *Session
+	m.sessions.Range(func(_, v interface{}) bool {
+		s := v.(*Session)
+		if s.Host == hostID && s.RemoteName == remoteName {
+			found = s
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// attach starts an ssh PTY for s and begins reading. cwd is only used for new sessions.
+// gen is the reconnect generation the caller acted on; a stale gen discards the PTY.
+func (m *Manager) attach(s *Session, host HostConfig, cwd string, gen int) error {
+	s.mu.Lock()
+	cols, rows := s.cols, s.rows
+	s.mu.Unlock()
+
+	cmdline := windowsCommandLine(sshExecutable(), attachArgs(host.SSH, s.RemoteName, cwd))
+	p, err := m.startPty(cmdline, "", cols, rows)
+	if err != nil {
+		log.Printf("attach %s on %s: %v", s.RemoteName, host.ID, err)
+		return fmt.Errorf("attach %s on %s: %w", s.RemoteName, host.Label, err)
+	}
+
+	s.mu.Lock()
+	if s.removed || s.reconnectGen != gen {
+		s.mu.Unlock()
+		p.Close()
+		return nil
+	}
+	s.cpty = p
+	s.Running = true
+	s.State = stateRunning
+	s.connectedAt = time.Now()
+	s.mu.Unlock()
+
+	go m.readLoop(s, p)
+	return nil
+}
+
+// broadcastError sends an error to all clients, tagged with host and session.
+func (m *Manager) broadcastError(hostID, sessionID, text string) {
+	msg := ServerMsg{Type: "error", Host: hostID, Session: sessionID, Error: text}
+	if encoded, err := json.Marshal(msg); err == nil {
+		m.broadcast(encoded)
+	}
+}
+
+// listRemote returns cs session names on host. A non-zero exit from screen itself
+// is normal (screen -ls exits 1 with or without sessions); only ssh failures are errors.
+func (m *Manager) listRemote(host HostConfig) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sshTimeout)
+	defer cancel()
+	out, err := m.runSSH(ctx, listArgs(host.SSH))
+	if err != nil && !isRemoteExitError(err) {
+		return nil, fmt.Errorf("list sessions on %s: %w", host.Label, err)
+	}
+	names, skipped := parseScreenList(string(out))
+	for _, name := range skipped {
+		log.Printf("list %s: ignoring session %q: invalid name", host.ID, remoteSessionPrefix+name)
+	}
+	return names, nil
+}
+
+// reconnectLoop reattaches s until it succeeds, the session is gone on the remote,
+// or the loop is superseded (gen changed) or cancelled by the user.
+func (m *Manager) reconnectLoop(s *Session, gen int, immediate bool) {
+	host, ok := m.hosts[s.Host]
+	if !ok {
+		m.setState(s, gen, stateDisconnected)
+		return
+	}
+	for {
+		// Checked first so a superseded loop never advances the shared backoff.
+		if m.reconnectCancelled(s, gen) {
+			return
+		}
+		if !immediate {
+			s.mu.Lock()
+			delay := s.backoff.Next()
+			s.mu.Unlock()
+			m.sleep(delay)
+		}
+		immediate = false
+		if m.reconnectCancelled(s, gen) {
+			return
+		}
+
+		names, err := m.listRemote(host)
+		switch nextReconnectAction(err, names, s.RemoteName) {
+		case actionEnded:
+			m.setState(s, gen, stateEnded)
+			return
+		case actionRetry:
+			log.Printf("reconnect %s on %s: %v", s.RemoteName, host.ID, err)
+			continue
+		}
+
+		if m.reconnectCancelled(s, gen) {
+			return
+		}
+		// If the session died after `screen -ls`, `cs <name>` creates a fresh one in the
+		// default folder. Accepted; a real fix needs an attach-only mode in cs.
+		if err := m.attach(s, host, "", gen); err != nil {
+			continue
+		}
+		m.broadcastSessions()
+		return
+	}
+}
+
+// reconnectCancelled reports whether a reconnect loop of generation gen should stop.
+func (m *Manager) reconnectCancelled(s *Session, gen int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.removed || s.endRequested || s.reconnectGen != gen || s.State != stateReconnecting
+}
+
+// setState sets state if the reconnect generation is still current, then broadcasts.
+func (m *Manager) setState(s *Session, gen int, state string) {
+	s.mu.Lock()
+	if s.reconnectGen != gen || s.removed {
+		s.mu.Unlock()
+		return
+	}
+	s.State = state
+	s.mu.Unlock()
+	m.broadcastSessions()
+}
+
+// Disconnect closes the SSH link of a remote session; Claude keeps running remotely.
+func (m *Manager) Disconnect(id string) {
+	s := m.get(id)
+	if s == nil || s.Host == "" {
+		return
+	}
+	s.mu.Lock()
+	s.disconnectRequested = true
+	s.reconnectGen++
+	running := s.Running
+	p := s.cpty
+	if !running {
+		s.State = stateDisconnected
+	}
+	s.mu.Unlock()
+
+	if running {
+		p.Close()
+		return
+	}
+	m.broadcastSessions()
+}
+
+// Reconnect immediately reattaches a disconnected (or ended) remote session.
+func (m *Manager) Reconnect(id string) {
+	s := m.get(id)
+	if s == nil || s.Host == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.Running || s.State == stateReconnecting {
+		s.mu.Unlock()
+		return
+	}
+	s.disconnectRequested = false
+	s.endRequested = false
+	s.State = stateReconnecting
+	s.backoff.Reset()
+	s.reconnectGen++
+	gen := s.reconnectGen
+	s.mu.Unlock()
+
+	m.broadcastSessions()
+	go m.reconnectLoop(s, gen, true)
+}
+
+// End stops the cs session on the remote machine (cs -k) and closes the link.
+// screen matches session names by prefix, so cs -k only runs when the exact name
+// is listed; otherwise `cs -k api` could kill cs-api2.
+func (m *Manager) End(id string) {
+	s := m.get(id)
+	if s == nil || s.Host == "" {
+		return
+	}
+	host, ok := m.hosts[s.Host]
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	s.endRequested = true
+	s.mu.Unlock()
+
+	go func() {
+		names, err := m.listRemote(host)
+		if err != nil {
+			log.Printf("end %s on %s: %v", s.RemoteName, host.ID, err)
+			m.endFailed(s, host, err)
+			return
+		}
+		if containsName(names, s.RemoteName) {
+			ctx, cancel := context.WithTimeout(context.Background(), sshTimeout)
+			defer cancel()
+			if _, err := m.runSSH(ctx, endArgs(host.SSH, s.RemoteName)); err != nil {
+				log.Printf("end %s on %s: %v", s.RemoteName, host.ID, err)
+				m.endFailed(s, host, err)
+				return
+			}
+		} else {
+			log.Printf("end %s on %s: not listed, marking ended", s.RemoteName, host.ID)
+		}
+		m.markEnded(s)
+	}()
+}
+
+// endFailed undoes an End request that could not be carried out and reports it.
+func (m *Manager) endFailed(s *Session, host HostConfig, err error) {
+	s.mu.Lock()
+	s.endRequested = false
+	// The link may have dropped while End was in flight, which marked the session
+	// ended (or left it reconnecting with its loop stopped by endRequested). The end
+	// failed, so the session may still exist: show disconnected.
+	revert := !s.Running && !s.removed &&
+		(s.State == stateEnded || s.State == stateReconnecting)
+	if revert {
+		s.State = stateDisconnected
+		s.reconnectGen++
+	}
+	s.mu.Unlock()
+	m.broadcastError(host.ID, s.ID, fmt.Sprintf("Could not end %s on %s: %v", s.RemoteName, host.Label, err))
+	if revert {
+		m.broadcastSessions()
+	}
+}
+
+// markEnded stops any reconnect and closes the link of a session that no longer exists.
+func (m *Manager) markEnded(s *Session) {
+	s.mu.Lock()
+	s.reconnectGen++
+	running := s.Running
+	p := s.cpty
+	if !running {
+		s.State = stateEnded
+	}
+	s.mu.Unlock()
+	if running {
+		p.Close()
+		return
+	}
+	m.broadcastSessions()
+}
+
+// Discover attaches to any cs sessions on hostID that are not already open.
+func (m *Manager) Discover(hostID string) {
+	host, ok := m.hosts[hostID]
+	if !ok {
+		return
+	}
+	m.discoverMu.Lock()
+	defer m.discoverMu.Unlock()
+
+	names, err := m.listRemote(host)
+	if err != nil {
+		log.Printf("discover %s: %v", host.ID, err)
+		text := fmt.Sprintf("Can't reach %s: %v", host.Label, err)
+		m.setHostError(host.ID, text)
+		m.broadcastError(host.ID, "", text)
+		return
+	}
+	m.setHostError(host.ID, "")
+	if encoded, err := json.Marshal(ServerMsg{Type: "host_ok", Host: host.ID}); err == nil {
+		m.broadcast(encoded)
+	}
+	for _, name := range names {
+		if m.findRemote(host.ID, name) != nil {
+			continue
+		}
+		// Attach without a folder. If the session died after `screen -ls`, cs creates a
+		// fresh one in the default folder; accepted (a real fix needs attach-only cs).
+		_, err := m.spawnRemoteSession(host, name, name, "", 80, 24)
+		switch {
+		case err == nil, errors.Is(err, errSessionOpen):
+			continue
+		case errors.Is(err, errMaxSessions):
+			log.Printf("discover %s: adopt %s: %v", host.ID, name, err)
+			m.broadcastError(host.ID, "", fmt.Sprintf("Couldn't open %s: %v", name, err))
+			return
+		default:
+			log.Printf("discover %s: adopt %s: %v", host.ID, name, err)
+			m.broadcastError(host.ID, "", fmt.Sprintf("Couldn't open %s on %s: %v", name, host.Label, err))
+		}
+	}
+}
+
+// setHostError records the last discovery error for hostID; "" clears it.
+func (m *Manager) setHostError(hostID, text string) {
+	m.hostErrMu.Lock()
+	defer m.hostErrMu.Unlock()
+	if text == "" {
+		delete(m.hostErr, hostID)
+		return
+	}
+	m.hostErr[hostID] = text
+}
+
+// HostErrors returns a copy of the last discovery error per host.
+func (m *Manager) HostErrors() map[string]string {
+	m.hostErrMu.Lock()
+	defer m.hostErrMu.Unlock()
+	out := make(map[string]string, len(m.hostErr))
+	for host, text := range m.hostErr {
+		out[host] = text
+	}
+	return out
+}
+
+// DiscoverAll runs Discover for every configured host.
+func (m *Manager) DiscoverAll() {
+	for id := range m.hosts {
+		m.Discover(id)
+	}
+}
+
+// BrowseRemote lists subdirectories of p on hostID (host default when p is empty).
+func (m *Manager) BrowseRemote(hostID, p string) (BrowseResult, error) {
+	host, ok := m.hosts[hostID]
+	if !ok {
+		return BrowseResult{}, fmt.Errorf("unknown host %q", hostID)
+	}
+	if p == "" {
+		p = host.DefaultCwd
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sshTimeout)
+	defer cancel()
+	out, err := m.runSSH(ctx, batchArgs(host.SSH, browseRemoteCommand(p)))
+	if err != nil {
+		return BrowseResult{}, fmt.Errorf("browse %s on %s: %w", p, host.Label, err)
+	}
+	abs, dirs, err := parseBrowseOutput(string(out))
+	if err != nil {
+		return BrowseResult{}, fmt.Errorf("browse %s on %s: %w", p, host.Label, err)
+	}
+	entries := make([]DirEntry, 0, len(dirs))
+	for _, d := range dirs {
+		entries = append(entries, DirEntry{Name: d, IsDir: true})
+	}
+	return BrowseResult{
+		Path:    abs,
+		Parent:  remoteParent(abs),
+		Entries: entries,
+		Drives:  []string{},
+		Sep:     "/",
+	}, nil
 }

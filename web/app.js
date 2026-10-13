@@ -6,15 +6,89 @@ let activeSession = null;
 let mode = 'grid';
 let contextMenuTarget = null;
 
-// Default working directory for new sessions (loaded from server config)
+// Default working directory for new local sessions (loaded from server config)
 var DEFAULT_CWD = '';
 
-// Load config from server
-fetch('/api/config')
-  .then(function(r) { return r.json(); })
-  .then(function(cfg) {
-    if (cfg.default_cwd) DEFAULT_CWD = cfg.default_cwd;
+// Machines: id '' is this Windows PC; others come from config.json "hosts".
+var HOSTS = [{ id: '', label: 'Windows', color: '#3b82f6', default_cwd: '' }];
+var activeHost = loadActiveHost();
+var hostErrors = {};
+var configLoaded = false;
+var configLoading = false;
+
+function loadActiveHost() {
+  try { return localStorage.getItem('kiss-tmux.activeHost') || ''; } catch (e) { return ''; }
+}
+
+function saveActiveHost() {
+  try { localStorage.setItem('kiss-tmux.activeHost', activeHost); } catch (e) {}
+}
+
+// Fetches /api/config once; a call while a fetch is in flight or after success is a no-op.
+function loadConfig() {
+  if (configLoaded || configLoading) return;
+  configLoading = true;
+  fetch('/api/config')
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) {
+      configLoading = false;
+      configLoaded = true;
+      if (cfg.default_cwd) DEFAULT_CWD = cfg.default_cwd;
+      HOSTS = [{
+        id: '',
+        label: cfg.local_label || 'Windows',
+        color: cfg.local_color || '#3b82f6',
+        default_cwd: DEFAULT_CWD
+      }];
+      (cfg.hosts || []).forEach(function(h) {
+        HOSTS.push({ id: h.id, label: h.label, color: h.color, default_cwd: h.default_cwd });
+      });
+      if (!HOSTS.some(function(h) { return h.id === activeHost; })) activeHost = '';
+      // ws.onopen skipped discovery because the remote hosts weren't known yet.
+      if (ws && ws.readyState === WebSocket.OPEN) discoverAllHosts();
+      render();
+    })
+    .catch(function(err) {
+      configLoading = false;
+      console.error('config load failed:', err);
+    });
+}
+
+// Asks the server to adopt existing sessions on every remote machine.
+function discoverAllHosts() {
+  HOSTS.forEach(function(h) {
+    if (h.id) send({ type: 'discover', host: h.id });
   });
+}
+
+function hostById(id) {
+  return HOSTS.find(function(h) { return h.id === id; }) || HOSTS[0];
+}
+
+// The machine actually shown; falls back to local until config lists the remembered host.
+function currentHostId() {
+  return hostById(activeHost).id;
+}
+
+function sessionHost(s) { return s.host || ''; }
+function isRemote(s) { return !!s.host; }
+function sessionState(s) { return s.state || (s.running ? 'running' : 'exited'); }
+
+function visibleSessions() {
+  var hostId = currentHostId();
+  return sessions.filter(function(s) { return sessionHost(s) === hostId; });
+}
+
+function findSession(id) {
+  return sessions.find(function(s) { return s.id === id; });
+}
+
+function dotClass(s) {
+  var st = sessionState(s);
+  if (st === 'running') return 'running';
+  if (st === 'reconnecting') return 'reconnecting';
+  return 'stopped';
+}
 
 // WebSocket
 function connect() {
@@ -23,6 +97,12 @@ function connect() {
 
   ws.onopen = function() {
     console.log('connected');
+    if (!configLoaded) {
+      // loadConfig's success handler sends discover once the hosts are known.
+      loadConfig();
+    } else {
+      discoverAllHosts();
+    }
   };
 
   ws.onclose = function() {
@@ -38,6 +118,7 @@ function connect() {
       case 'sessions': handleSessions(msg); break;
       case 'spawned':  handleSpawned(msg); break;
       case 'error':    handleError(msg); break;
+      case 'host_ok':  handleHostOk(msg); break;
     }
   };
 }
@@ -52,7 +133,25 @@ function send(msg) {
 function handleOutput(msg) {
   var t = terminals[msg.session];
   if (t) {
-    t.term.write(msg.data);
+    // Throttle large replay chunks to avoid freezing the browser.
+    // Split into 4KB pieces rendered across animation frames.
+    var data = msg.data;
+    if (data.length > 4096) {
+      var offset = 0;
+      var chunk = 4096;
+      function writeChunk() {
+        if (offset >= data.length) return;
+        var end = Math.min(offset + chunk, data.length);
+        t.term.write(data.substring(offset, end));
+        offset = end;
+        if (offset < data.length) {
+          requestAnimationFrame(writeChunk);
+        }
+      }
+      writeChunk();
+    } else {
+      t.term.write(data);
+    }
   }
 }
 
@@ -85,7 +184,22 @@ function handleSpawned(msg) {
 }
 
 function handleError(msg) {
-  console.error('server error:', msg.error, msg.session || '');
+  console.error('server error:', msg.error, msg.session || '', msg.host || '');
+  // Typing into a dead session produces a stream of these; the dot already shows it.
+  if (msg.session && /not running/.test(msg.error)) return;
+  var hostId = msg.host || '';
+  if (!msg.host && msg.session) {
+    var s = findSession(msg.session);
+    if (s) hostId = sessionHost(s);
+  }
+  hostErrors[hostId] = msg.error;
+  render();
+}
+
+// A successful discovery means the machine is reachable again.
+function handleHostOk(msg) {
+  delete hostErrors[msg.host || ''];
+  render();
 }
 
 // Terminal Management
@@ -202,12 +316,92 @@ function attachTerminal(id, container) {
 }
 
 // Rendering
+
+// Never leave activeSession on a hidden machine: focus view, paste and copy would
+// show or type into another machine's terminal under the current tab.
+function normalizeActiveSession() {
+  var visible = visibleSessions();
+  if (!visible.some(function(s) { return s.id === activeSession; })) {
+    activeSession = visible.length ? visible[0].id : null;
+  }
+  if (mode === 'focus' && !activeSession) mode = 'grid';
+}
+
 function render() {
+  normalizeActiveSession();
+  document.documentElement.style.setProperty('--host-color', hostById(activeHost).color);
+  renderTabs();
+  renderBanner();
   if (mode === 'grid') {
     renderGrid();
   } else {
     renderFocus();
   }
+}
+
+function renderTabs() {
+  var bar = document.getElementById('host-tabs');
+  bar.innerHTML = '';
+  if (HOSTS.length < 2) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  var currentId = currentHostId();
+  HOSTS.forEach(function(h) {
+    var count = sessions.filter(function(s) { return sessionHost(s) === h.id; }).length;
+    var tab = document.createElement('button');
+    tab.className = 'host-tab' + (h.id === currentId ? ' active' : '');
+    tab.style.setProperty('--tab-color', h.color);
+    var swatch = document.createElement('span');
+    swatch.className = 'host-swatch';
+    tab.appendChild(swatch);
+    tab.appendChild(document.createTextNode(h.label.toUpperCase() + ' (' + count + ')'));
+    if (hostErrors[h.id] && h.id !== currentId) {
+      var alertEl = document.createElement('span');
+      alertEl.className = 'host-tab-alert';
+      alertEl.textContent = '!';
+      alertEl.title = hostErrors[h.id];
+      tab.appendChild(alertEl);
+    }
+    tab.addEventListener('click', function() { switchHost(h.id); });
+    bar.appendChild(tab);
+  });
+}
+
+function renderBanner() {
+  var banner = document.getElementById('host-banner');
+  var hostId = currentHostId();
+  var text = hostErrors[hostId];
+  banner.innerHTML = '';
+  if (!text) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.classList.remove('hidden');
+  var span = document.createElement('span');
+  span.textContent = text;
+  banner.appendChild(span);
+  var close = document.createElement('button');
+  close.textContent = '\u00d7';
+  close.title = 'Dismiss';
+  close.addEventListener('click', function() {
+    delete hostErrors[hostId];
+    render();
+  });
+  banner.appendChild(close);
+}
+
+function switchHost(id) {
+  activeHost = id;
+  saveActiveHost();
+  var hostId = currentHostId();
+  if (hostId) {
+    delete hostErrors[hostId];
+    send({ type: 'discover', host: hostId });
+  }
+  normalizeActiveSession();
+  render();
 }
 
 function renderGrid() {
@@ -216,9 +410,10 @@ function renderGrid() {
 
   var container = document.getElementById('grid-container');
   container.innerHTML = '';
-  container.dataset.count = sessions.length + 1;
+  var visible = visibleSessions();
+  container.dataset.count = visible.length + 1;
 
-  sessions.forEach(function(s) {
+  visible.forEach(function(s) {
     var cell = document.createElement('div');
     cell.className = 'grid-cell';
     cell.dataset.session = s.id;
@@ -227,7 +422,7 @@ function renderGrid() {
     header.className = 'grid-cell-header';
 
     var dot = document.createElement('div');
-    dot.className = 'dot ' + (s.running ? 'running' : 'stopped');
+    dot.className = 'dot ' + dotClass(s);
     header.appendChild(dot);
 
     var name = document.createElement('span');
@@ -238,6 +433,24 @@ function renderGrid() {
       startRename(s.id, name);
     });
     header.appendChild(name);
+
+    var st = sessionState(s);
+    if (isRemote(s) && st !== 'running') {
+      var badge = document.createElement('span');
+      badge.className = 'state-badge';
+      badge.textContent = st === 'reconnecting' ? 'reconnecting\u2026' : st;
+      header.appendChild(badge);
+    }
+    if (isRemote(s) && st === 'disconnected') {
+      var reconnectBtn = document.createElement('button');
+      reconnectBtn.className = 'reconnect-btn';
+      reconnectBtn.textContent = 'Reconnect';
+      reconnectBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        send({ type: 'reconnect', session: s.id });
+      });
+      header.appendChild(reconnectBtn);
+    }
 
     header.addEventListener('contextmenu', function(e) {
       e.preventDefault();
@@ -288,17 +501,19 @@ function renderFocus() {
   sidebar.appendChild(gridBtn);
 
   // Session tabs
-  sessions.forEach(function(s) {
+  visibleSessions().forEach(function(s) {
     var tab = document.createElement('button');
     tab.className = 'sidebar-tab' + (s.id === activeSession ? ' active' : '');
 
     var abbr = s.name.substring(0, 6).toUpperCase();
     tab.textContent = abbr;
-    tab.title = s.name;
-    tab.dataset.name = s.name;
+    var tabState = sessionState(s);
+    var tabLabel = isRemote(s) && tabState !== 'running' ? s.name + ' (' + tabState + ')' : s.name;
+    tab.title = tabLabel;
+    tab.dataset.name = tabLabel;
 
     var tabDot = document.createElement('div');
-    tabDot.className = 'tab-dot ' + (s.running ? 'running' : 'stopped');
+    tabDot.className = 'tab-dot ' + dotClass(s);
     tab.appendChild(tabDot);
 
     tab.addEventListener('click', function() {
@@ -331,10 +546,38 @@ function renderFocus() {
   var focusDiv = document.getElementById('focus-terminal');
   focusDiv.innerHTML = '';
 
+  var current = activeSession ? findSession(activeSession) : null;
+  if (current && isRemote(current) && sessionState(current) === 'disconnected') {
+    focusDiv.appendChild(disconnectedBar(current));
+  }
+
+  // The terminal goes in its own flex child so the bar above it doesn't overflow.
+  var termHost = document.createElement('div');
+  termHost.className = 'focus-term-host';
+  focusDiv.appendChild(termHost);
+
   if (activeSession && terminals[activeSession]) {
-    attachTerminal(activeSession, focusDiv);
+    attachTerminal(activeSession, termHost);
     terminals[activeSession].term.focus();
   }
+}
+
+// Bar shown above a disconnected remote session in focus view.
+function disconnectedBar(s) {
+  var bar = document.createElement('div');
+  bar.className = 'disconnected-bar';
+  var text = document.createElement('span');
+  text.textContent = 'Disconnected from ' + hostById(s.host).label + '.';
+  bar.appendChild(text);
+  var btn = document.createElement('button');
+  btn.className = 'reconnect-btn';
+  btn.textContent = 'Reconnect';
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    send({ type: 'reconnect', session: s.id });
+  });
+  bar.appendChild(btn);
+  return bar;
 }
 
 // Mode Switching
@@ -351,11 +594,20 @@ function switchToGrid() {
 
 
 // New Session Dialog
+// Machine the open New Session dialog (and its folder browser) targets.
+var dialogHost = '';
+
 function showNewSessionDialog() {
+  dialogHost = currentHostId();
+  var host = hostById(dialogHost);
+  var remote = !!host.id;
   document.getElementById('dialog-overlay').classList.remove('hidden');
+  document.getElementById('dialog-title').textContent = 'New Session on ' + host.label;
   document.getElementById('dialog-name').value = '';
-  document.getElementById('dialog-cwd').value = DEFAULT_CWD;
+  document.getElementById('dialog-name').placeholder = remote ? 'optional, e.g. api-work' : 'optional';
+  document.getElementById('dialog-cwd').value = remote ? (host.default_cwd || '') : DEFAULT_CWD;
   document.getElementById('dialog-cmd').value = 'claude --dangerously-skip-permissions';
+  document.getElementById('dialog-cmd-row').classList.toggle('hidden', remote);
   document.getElementById('dialog-name').focus();
 }
 
@@ -367,15 +619,21 @@ function hideNewSessionDialog() {
 function createSessionFromDialog() {
   var name = document.getElementById('dialog-name').value.trim();
   var cwd = document.getElementById('dialog-cwd').value.trim();
-  var cmd = document.getElementById('dialog-cmd').value.trim() || 'claude --dangerously-skip-permissions';
-
-  send({ type: 'spawn', cmd: cmd, cwd: cwd, name: name });
+  var msg = { type: 'spawn', cwd: cwd, name: name };
+  if (dialogHost) {
+    msg.host = dialogHost;
+  } else {
+    msg.cmd = document.getElementById('dialog-cmd').value.trim() ||
+      'claude --dangerously-skip-permissions';
+  }
+  send(msg);
   hideNewSessionDialog();
 }
 
 // Directory Browser
 var dirBrowserPath = '';
 var dirBrowserParent = '';
+var browseSeq = 0;
 
 function openDirBrowser() {
   var startPath = document.getElementById('dialog-cwd').value.trim() || '';
@@ -387,24 +645,49 @@ function closeDirBrowser() {
   document.getElementById('dir-browser').classList.add('hidden');
 }
 
+function joinPath(base, name, sep) {
+  return base.charAt(base.length - 1) === sep ? base + name : base + sep + name;
+}
+
 function fetchDirectory(path) {
-  var url = '/api/browse';
-  if (path) url += '?path=' + encodeURIComponent(path);
+  // Forget the previous listing so Select can't pick a stale (or other machine's) path.
+  var seq = ++browseSeq;
+  dirBrowserPath = '';
+  dirBrowserParent = '';
+  document.getElementById('dir-browser-path').textContent = '';
+
+  var params = [];
+  if (path) params.push('path=' + encodeURIComponent(path));
+  if (dialogHost) params.push('host=' + encodeURIComponent(dialogHost));
+  var url = '/api/browse' + (params.length ? '?' + params.join('&') : '');
+
+  var list = document.getElementById('dir-browser-list');
+  list.innerHTML = '';
+  var loading = document.createElement('div');
+  loading.className = 'dir-entry';
+  loading.style.color = 'var(--text-dim)';
+  loading.textContent = 'Loading\u2026';
+  list.appendChild(loading);
 
   fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (seq !== browseSeq) return;
+      list.innerHTML = '';
       if (data.error) {
         console.error('browse error:', data.error);
+        var errEl = document.createElement('div');
+        errEl.className = 'dir-entry';
+        errEl.style.color = 'var(--accent)';
+        errEl.textContent = data.error;
+        list.appendChild(errEl);
         return;
       }
+      var sep = data.sep || '\\';
       dirBrowserPath = data.path;
       dirBrowserParent = data.parent;
 
       document.getElementById('dir-browser-path').textContent = data.path;
-
-      var list = document.getElementById('dir-browser-list');
-      list.innerHTML = '';
 
       // Show drive letters at root on Windows
       if (data.drives && data.drives.length > 0) {
@@ -425,7 +708,7 @@ function fetchDirectory(path) {
         el.className = 'dir-entry';
         el.textContent = '\uD83D\uDCC1 ' + entry.name;
         el.addEventListener('click', function() {
-          fetchDirectory(dirBrowserPath + '\\' + entry.name);
+          fetchDirectory(joinPath(dirBrowserPath, entry.name, sep));
         });
         list.appendChild(el);
       });
@@ -439,11 +722,19 @@ function fetchDirectory(path) {
       }
     })
     .catch(function(err) {
+      if (seq !== browseSeq) return;
       console.error('browse fetch error:', err);
+      list.innerHTML = '';
+      var failEl = document.createElement('div');
+      failEl.className = 'dir-entry';
+      failEl.style.color = 'var(--accent)';
+      failEl.textContent = "Couldn't load folders";
+      list.appendChild(failEl);
     });
 }
 
 function selectDirBrowser() {
+  if (!dirBrowserPath) return;
   document.getElementById('dialog-cwd').value = dirBrowserPath;
   closeDirBrowser();
 }
@@ -451,10 +742,31 @@ function selectDirBrowser() {
 // Context Menu
 function showContextMenu(e, sessionId) {
   contextMenuTarget = sessionId;
+  var s = findSession(sessionId);
+  var remote = !!(s && isRemote(s));
   var menu = document.getElementById('context-menu');
+  menu.querySelectorAll('.local-only').forEach(function(el) {
+    el.classList.toggle('hidden', remote);
+  });
+  menu.querySelectorAll('.remote-only').forEach(function(el) {
+    el.classList.toggle('hidden', !remote);
+  });
+  if (remote) {
+    var st = sessionState(s);
+    menu.querySelector('[data-action="end"]').textContent =
+      'End on ' + hostById(s.host).label + '\u2026';
+    menu.querySelector('[data-action="reconnect"]').classList.toggle('hidden', st !== 'disconnected');
+    menu.querySelector('[data-action="disconnect"]').classList.toggle('hidden',
+      st === 'disconnected' || st === 'ended');
+    menu.querySelector('[data-action="end"]').classList.toggle('hidden', st === 'ended');
+  }
   menu.classList.remove('hidden');
-  menu.style.left = e.clientX + 'px';
-  menu.style.top = e.clientY + 'px';
+  var left = e.clientX;
+  var top = e.clientY;
+  if (left + menu.offsetWidth > window.innerWidth) left = window.innerWidth - menu.offsetWidth - 4;
+  if (top + menu.offsetHeight > window.innerHeight) top = window.innerHeight - menu.offsetHeight - 4;
+  menu.style.left = Math.max(0, left) + 'px';
+  menu.style.top = Math.max(0, top) + 'px';
 }
 
 function hideContextMenu() {
@@ -506,8 +818,12 @@ function setupKeyboard() {
 
 // Copy/paste support for xterm.js terminals
 function activeTerminal() {
-  if (activeSession && terminals[activeSession]) return terminals[activeSession].term;
-  if (sessions.length > 0 && terminals[sessions[0].id]) return terminals[sessions[0].id].term;
+  var current = activeSession ? findSession(activeSession) : null;
+  if (current && sessionHost(current) === currentHostId() && terminals[activeSession]) {
+    return terminals[activeSession].term;
+  }
+  var visible = visibleSessions();
+  if (visible.length > 0 && terminals[visible[0].id]) return terminals[visible[0].id].term;
   return null;
 }
 
@@ -606,10 +922,28 @@ function init() {
       if (action === 'kill' && contextMenuTarget) {
         send({ type: 'kill', session: contextMenuTarget });
       }
+      if (action === 'disconnect' && contextMenuTarget) {
+        send({ type: 'disconnect', session: contextMenuTarget });
+      }
+      if (action === 'reconnect' && contextMenuTarget) {
+        send({ type: 'reconnect', session: contextMenuTarget });
+      }
+      if (action === 'end' && contextMenuTarget) {
+        var target = findSession(contextMenuTarget);
+        var csName = target && target.remote_name ? ' (cs-' + target.remote_name + ')' : '';
+        if (target && confirm('Stop "' + target.name + '"' + csName + ' on ' +
+            hostById(target.host).label +
+            '? Claude will be shut down there, not just disconnected.')) {
+          send({ type: 'end', session: contextMenuTarget });
+        }
+      }
       if (action === 'remove' && contextMenuTarget) {
         send({ type: 'remove', session: contextMenuTarget });
         if (activeSession === contextMenuTarget) {
-          activeSession = sessions.length > 1 ? sessions.find(function(s) { return s.id !== contextMenuTarget; }).id : null;
+          var removedId = contextMenuTarget;
+          var next = visibleSessions().find(function(s) { return s.id !== removedId; });
+          activeSession = next ? next.id : null;
+          if (!next && mode === 'focus') mode = 'grid';
         }
       }
       if (action === 'rename' && contextMenuTarget) {
@@ -629,6 +963,7 @@ function init() {
   setupKeyboard();
   setupClipboard();
 
+  loadConfig();
   connect();
 }
 

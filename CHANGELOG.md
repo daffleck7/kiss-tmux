@@ -2,6 +2,32 @@
 
 All notable changes to KISS-TMUX are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Remote machine tabs.** Run and monitor Claude sessions on a Mac (or any SSH host with a `cs` + `screen` wrapper) alongside local sessions.
+- Per-machine color coding on tabs, grid borders, sidebar, focused terminal and dialog.
+- Auto-discovery of running remote sessions on startup, on tab open and on browser reconnect.
+- Auto-reconnect with exponential backoff (1s to 30s); stops when the remote session is gone.
+- Separate **Disconnect** (keep running) and **End on remote** (`cs -k`, confirmed) actions.
+- Remote folder browser over SSH; error banner and tab alert when a machine is unreachable.
+  The banner is also shown to browser tabs opened after the error (e.g. a startup
+  "can't reach"), and clears itself once the machine answers again.
+- Reconnect bar in focus view for a disconnected remote session.
+- `hosts`, `local_label` and `local_color` in `config.json`.
+
+### Security
+- The WebSocket only accepts connections from KISS-TMUX's own page
+  (`127.0.0.1:<port>` / `localhost:<port>`) or non-browser clients, so other websites can't
+  drive your sessions.
+- **End** checks `screen -ls` first and only runs `cs -k` for an exact name match; screen's
+  prefix matching can no longer stop a different session.
+
+### Fixed
+- Sessions whose process exits now show as exited (ConPTY kept the output pipe open).
+- Sidebar status dots now have colors.
+- A second instance on the same port exits before attaching to remote sessions.
+
 ## [v0.3.0] — 2026-04-09
 
 ### Added

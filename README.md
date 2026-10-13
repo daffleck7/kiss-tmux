@@ -44,13 +44,14 @@ kiss-tmux [flags]
 
 ## Features
 
-- **Grid mode** — auto-arranging CSS grid, up to 8 concurrent sessions
+- **Grid mode** — auto-arranging CSS grid, up to 8 concurrent sessions per machine
 - **Focus mode** — thin sidebar with 6-char session abbreviations + full-size terminal
 - **WebGL rendering** — GPU-accelerated text rendering via `xterm-addon-webgl`, matching VSCode's terminal smoothness
 - **Sidebar buttons** — grid toggle (☰), new session (+), one tab per session
 - **Hover tooltips** — full session names on hover
 - **Copy/paste** — `Ctrl+V` / `Ctrl+Shift+V` / right-click paste; `Ctrl+Shift+C` copy
-- **Context menu** — right-click a session header to rename or kill
+- **Context menu** — right-click a session header: **Rename / Kill / Remove** for local sessions,
+  **Rename / Disconnect / End / Remove** for remote ones (plus **Reconnect** when disconnected)
 - **Inline rename** — double-click a session name in the grid
 - **Live reconnect** — refresh the browser and sessions replay from a 64KB ring buffer
 - **Multiple browser tabs** — all tabs stay in sync via WebSocket broadcast
@@ -67,6 +68,88 @@ kiss-tmux [flags]
 
 All other navigation uses buttons so that terminal programs keep their keyboard input. Click session tabs to switch sessions. Click ☰ to return to grid view. Click + to open the new-session dialog.
 
+## Remote machines (Mac over SSH)
+
+KISS-TMUX can drive Claude sessions on another machine over SSH, each machine in its own
+color-coded tab (`[WINDOWS] [MAC]`). The color shows on the tab, grid borders, sidebar and
+focused terminal, so you always know which machine you're typing into.
+
+**Remote requirements:** key-based SSH login, GNU `screen`, and a `cs` command on the
+remote's non-interactive PATH (e.g. set in `~/.zshenv`):
+
+| Command | Effect |
+|---------|--------|
+| `cs <name> <dir>` | Start session `<name>` in `<dir>`, or reattach if it exists |
+| `cs <name>` | Reattach |
+| `cs -k <name>` | End the session |
+
+`cs` must name its screen sessions `cs-<name>`; discovery reads `screen -ls`.
+
+**Setup:**
+
+1. Add the host to `~/.ssh/config` and install your key on it:
+
+   ```
+   Host mac
+       HostName 100.x.y.z        # Tailscale IP, or the LAN IP
+       User me
+       ServerAliveInterval 30
+   ```
+
+2. Add it to `config.json` next to the exe:
+
+   ```json
+   {
+     "default_cwd": "C:\\Users\\you\\Desktop",
+     "hosts": [{ "id": "mac", "label": "Mac", "ssh": "mac",
+                 "default_cwd": "~/Desktop/Projects", "color": "#f97316" }]
+   }
+   ```
+
+   Optional: `local_label` (default `Windows`) and `local_color` (default `#3b82f6`).
+
+**Behavior:**
+
+- Running remote sessions are found automatically at startup and whenever you open the tab.
+- A dropped connection reconnects on its own (1s, 2s, 4s ... up to 30s). Claude keeps running
+  on the remote the whole time, inside `screen`.
+- Right-click a remote session: **Disconnect** closes the SSH link only; **End on Mac...**
+  (with confirmation) runs `cs -k` and stops Claude. **Remove** hides the tile; the session
+  reappears on the next discovery.
+- The folder browser in the New Session dialog lists the remote machine's folders. An empty
+  folder uses the host's `default_cwd`.
+- In focus view, a disconnected remote session shows a **Reconnect** bar above the terminal.
+- Up to 8 sessions per machine.
+- Session names allow letters, digits, `-` and `_`, up to 32 characters (other characters
+  become `-`). **End** only runs `cs -k` when that exact name is listed, so it can never stop
+  a different session that shares a prefix.
+- **Rename** is display-only: the `cs` name stays the same, and the new name is lost when
+  KISS-TMUX restarts.
+- Remote sessions survive KISS-TMUX restarts (they live in `screen`), but a reboot of the
+  remote machine ends them all.
+- Noticing a dropped link can take up to ~90s (SSH keepalive: 3 missed 30s probes).
+- If Claude on the Mac asks you to `/login`, that's because the macOS Keychain can be locked
+  over SSH; run `/login` in that session.
+- `~/.screenrc` on the remote must not set `autodetach off`, or closing the SSH link kills
+  the session.
+- Only pages served by KISS-TMUX itself (same origin) can control it; other websites can't
+  open its WebSocket.
+
+### Restarting without losing Claude conversations
+
+`scripts/restart-and-resume.ps1` restarts KISS-TMUX and reopens every Claude conversation
+that was running in it, using `claude --resume <id>`. If `kiss-tmux-new.exe` exists next to
+`kiss-tmux.exe`, it is installed first (the old exe is kept as `kiss-tmux.exe~`).
+
+```powershell
+go build -o kiss-tmux-new.exe .          # optional: stage a new build
+powershell -ExecutionPolicy Bypass -File scriptsestart-and-resume.ps1 -DryRun   # preview
+powershell -ExecutionPolicy Bypass -File scriptsestart-and-resume.ps1
+```
+
+Run it from a normal PowerShell window. The restart continues in its own window, so it
+keeps going after KISS-TMUX closes. Remote sessions are rediscovered automatically.
+
 ## Requirements
 
 - **Windows 10 build 1809 or later** (for ConPTY support)
@@ -76,14 +159,19 @@ Only Windows is supported in v1. Cross-platform is a non-goal — ConPTY keeps t
 
 ## Architecture
 
-Six files. Two Go dependencies. One HTML, one CSS, one JS. No npm, no build toolchain.
+Seven Go files. Two Go dependencies. One HTML, one CSS, one JS. No npm, no build toolchain.
+Remote sessions are just `ssh.exe -t <host> "cs <name>"` running inside ConPTY like any other
+command.
 
 ```
 kiss-tmux/
 ├── main.go              # CLI entry, flag parsing, wiring
 ├── server.go            # Hub, Client, WebSocket handler, HTTP embed
-├── session.go           # RingBuffer, Session, Manager (ConPTY lifecycle)
+├── session.go           # RingBuffer, Session, Manager (local + remote lifecycle)
 ├── protocol.go          # JSON message types
+├── config.go            # config.json loading and validation (hosts, colors)
+├── remote.go            # SSH/cs command building, screen -ls parsing, backoff
+├── pty.go               # ConPTY wrapper behind a small interface (fakeable in tests)
 ├── web/
 │   ├── index.html       # Grid view, focus view, dialog, context menu
 │   ├── app.js           # WebSocket client, xterm.js terminal management
@@ -133,16 +221,20 @@ All web assets are embedded via `go:embed` — the binary is fully self-containe
 ## Testing
 
 ```bash
-go test -v
+go test -v ./...
 ```
 
-18 tests covering the protocol (JSON roundtrip), ring buffer (circular overflow), and session manager (ConPTY lifecycle with real `cmd.exe` spawns).
+80 tests covering the protocol (JSON roundtrip), ring buffer (circular overflow), config
+validation, the WebSocket origin check, the session manager (ConPTY lifecycle with real
+`cmd.exe` spawns), and the remote logic (spawn, reconnect, disconnect, end, discovery),
+which runs against fake SSH and PTY implementations, so no Mac is needed.
 
 ## Non-goals
 
 - Cross-platform support (Windows only)
 - Authentication / multi-user (localhost only, bound to 127.0.0.1)
-- Session persistence across server restarts
+- Session persistence across server restarts (local sessions; remote sessions survive
+  restarts because they live in `screen` on the remote)
 - Task management, kanban, or agent-specific parsing
 - React, build toolchains, or npm
 

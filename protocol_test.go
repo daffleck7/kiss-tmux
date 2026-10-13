@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,49 @@ func TestServerMsgOmitsEmpty(t *testing.T) {
 	}
 	if _, ok := raw["error"]; ok {
 		t.Error("error field should be omitted when empty")
+	}
+}
+
+func TestClientMsgHost(t *testing.T) {
+	raw := `{"type":"spawn","host":"mac","name":"agent","cwd":"~/x"}`
+	var msg ClientMsg
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Host != "mac" {
+		t.Errorf("host = %q, want mac", msg.Host)
+	}
+}
+
+func TestSessionInfoHostAndState(t *testing.T) {
+	data, err := json.Marshal(SessionInfo{ID: "a", Name: "n", Host: "mac", State: "reconnecting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"host":"mac"`) || !strings.Contains(s, `"state":"reconnecting"`) {
+		t.Errorf("json = %s", s)
+	}
+}
+
+func TestServerMsgErrorHost(t *testing.T) {
+	data, _ := json.Marshal(ServerMsg{Type: "error", Host: "mac", Error: "boom"})
+	if !strings.Contains(string(data), `"host":"mac"`) {
+		t.Errorf("json = %s", data)
+	}
+	data, _ = json.Marshal(ServerMsg{Type: "exited"})
+	if strings.Contains(string(data), `"host"`) {
+		t.Errorf("host should be omitted when empty: %s", data)
+	}
+}
+
+func TestSessionInfoRemoteName(t *testing.T) {
+	data, _ := json.Marshal(SessionInfo{ID: "a", Host: "mac", RemoteName: "API-work"})
+	if !strings.Contains(string(data), `"remote_name":"API-work"`) {
+		t.Errorf("json = %s", data)
+	}
+	data, _ = json.Marshal(SessionInfo{ID: "a"})
+	if strings.Contains(string(data), `remote_name`) {
+		t.Errorf("remote_name should be omitted when empty: %s", data)
 	}
 }

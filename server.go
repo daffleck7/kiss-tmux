@@ -3,9 +3,11 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,12 +22,34 @@ import (
 //go:embed web
 var webFS embed.FS
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
+// allowedOrigin reports whether a WebSocket Origin may control KISS-TMUX: no Origin
+// (a non-browser client) or this server's own page on 127.0.0.1 or localhost.
+// Anything else could be a web page trying to drive the terminals.
+func allowedOrigin(origin string, port int) bool {
+	if origin == "" {
 		return true
-	},
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == fmt.Sprintf("127.0.0.1:%d", port) || u.Host == fmt.Sprintf("localhost:%d", port)
+}
+
+// newUpgrader returns a WebSocket upgrader that only accepts same-origin pages.
+func newUpgrader(port int) *websocket.Upgrader {
+	return &websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if allowedOrigin(origin, port) {
+				return true
+			}
+			log.Printf("ws: rejected origin %q", origin)
+			return false
+		},
+	}
 }
 
 type Hub struct {
@@ -134,9 +158,16 @@ func (c *Client) readPump(hub *Hub, mgr *Manager) {
 
 		switch msg.Type {
 		case "spawn":
-			id, err := mgr.Spawn(msg.Cmd, msg.Cwd, msg.Name, msg.Cols, msg.Rows)
+			var id string
+			var err error
+			if msg.Host != "" {
+				id, err = mgr.SpawnRemote(msg.Host, msg.Name, msg.Cwd, msg.Cols, msg.Rows)
+			} else {
+				id, err = mgr.Spawn(msg.Cmd, msg.Cwd, msg.Name, msg.Cols, msg.Rows)
+			}
 			if err != nil {
-				errMsg := ServerMsg{Type: "error", Error: err.Error()}
+				log.Printf("spawn (host=%q name=%q): %v", msg.Host, msg.Name, err)
+				errMsg := ServerMsg{Type: "error", Host: msg.Host, Error: err.Error()}
 				if data, err := json.Marshal(errMsg); err == nil {
 					c.safeSend(data)
 				}
@@ -161,6 +192,14 @@ func (c *Client) readPump(hub *Hub, mgr *Manager) {
 			mgr.Rename(msg.Session, msg.Name)
 		case "remove":
 			mgr.Remove(msg.Session)
+		case "disconnect":
+			mgr.Disconnect(msg.Session)
+		case "reconnect":
+			mgr.Reconnect(msg.Session)
+		case "end":
+			mgr.End(msg.Session)
+		case "discover":
+			go mgr.Discover(msg.Host)
 		case "list":
 			sessMsg := mgr.SessionsMessage()
 			if data, err := json.Marshal(sessMsg); err == nil {
@@ -185,37 +224,21 @@ func sendInitialState(client *Client, mgr *Manager) {
 			}
 		}
 	}
-}
 
-// AppConfig holds user-configurable settings loaded from config.json.
-type AppConfig struct {
-	DefaultCwd string `json:"default_cwd"`
-}
-
-func loadConfig() AppConfig {
-	var cfg AppConfig
-
-	exePath, err := os.Executable()
-	if err == nil {
-		data, err := os.ReadFile(filepath.Join(filepath.Dir(exePath), "config.json"))
-		if err == nil {
-			json.Unmarshal(data, &cfg)
+	// Errors such as a startup "can't reach" happened before this client connected.
+	for host, text := range mgr.HostErrors() {
+		msg := ServerMsg{Type: "error", Host: host, Error: text}
+		if data, err := json.Marshal(msg); err == nil {
+			client.safeSend(data)
 		}
 	}
-
-	if cfg.DefaultCwd == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			cfg.DefaultCwd = home
-		}
-	}
-
-	return cfg
 }
 
-func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
+// SetupHTTP builds the HTTP handler. port is the port the server listens on,
+// used to accept WebSocket connections only from its own page.
+func SetupHTTP(hub *Hub, mgr *Manager, cfg AppConfig, port int) http.Handler {
 	mux := http.NewServeMux()
-	cfg := loadConfig()
+	upgrader := newUpgrader(port)
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -243,71 +266,24 @@ func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
 		json.NewEncoder(w).Encode(cfg)
 	})
 
-	// Directory listing API for the browse dialog.
+	// Directory listing API for the browse dialog. ?host=<id> lists a remote machine.
 	mux.HandleFunc("/api/browse", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
 		reqPath := r.URL.Query().Get("path")
-		if reqPath == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				home = "."
-			}
-			reqPath = home
-		}
 
-		absPath, err := filepath.Abs(reqPath)
+		var result BrowseResult
+		var err error
+		if hostID := r.URL.Query().Get("host"); hostID != "" {
+			result, err = mgr.BrowseRemote(hostID, reqPath)
+		} else {
+			result, err = browseLocal(reqPath)
+		}
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			log.Printf("browse: %v", err)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-
-		entries, err := os.ReadDir(absPath)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
-			return
-		}
-
-		type DirEntry struct {
-			Name  string `json:"name"`
-			IsDir bool   `json:"isDir"`
-		}
-
-		var dirs []DirEntry
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".") {
-				continue
-			}
-			if e.IsDir() {
-				dirs = append(dirs, DirEntry{Name: e.Name(), IsDir: true})
-			}
-		}
-		sort.Slice(dirs, func(i, j int) bool {
-			return strings.ToLower(dirs[i].Name) < strings.ToLower(dirs[j].Name)
-		})
-
-		// Build list of drive letters on Windows for root navigation.
-		var drives []string
-		if runtime.GOOS == "windows" && (absPath == filepath.VolumeName(absPath)+string(filepath.Separator) || absPath == filepath.VolumeName(absPath)) {
-			for c := 'A'; c <= 'Z'; c++ {
-				drive := string(c) + ":\\"
-				if _, err := os.Stat(drive); err == nil {
-					drives = append(drives, drive)
-				}
-			}
-		}
-
-		parent := filepath.Dir(absPath)
-		if parent == absPath {
-			parent = ""
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"path":    absPath,
-			"parent":  parent,
-			"entries": dirs,
-			"drives":  drives,
-		})
+		json.NewEncoder(w).Encode(result)
 	})
 
 	sub, err := fs.Sub(webFS, "web")
@@ -317,4 +293,53 @@ func SetupHTTP(hub *Hub, mgr *Manager) http.Handler {
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	return mux
+}
+
+// browseLocal lists subdirectories of reqPath on this machine (home when empty).
+func browseLocal(reqPath string) (BrowseResult, error) {
+	if reqPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "."
+		}
+		reqPath = home
+	}
+
+	absPath, err := filepath.Abs(reqPath)
+	if err != nil {
+		return BrowseResult{}, err
+	}
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return BrowseResult{}, err
+	}
+
+	dirs := []DirEntry{}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") || !e.IsDir() {
+			continue
+		}
+		dirs = append(dirs, DirEntry{Name: e.Name(), IsDir: true})
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return strings.ToLower(dirs[i].Name) < strings.ToLower(dirs[j].Name)
+	})
+
+	// Drive letters on Windows for root navigation.
+	drives := []string{}
+	volume := filepath.VolumeName(absPath)
+	if runtime.GOOS == "windows" && (absPath == volume+string(filepath.Separator) || absPath == volume) {
+		for c := 'A'; c <= 'Z'; c++ {
+			drive := string(c) + ":\\"
+			if _, err := os.Stat(drive); err == nil {
+				drives = append(drives, drive)
+			}
+		}
+	}
+
+	parent := filepath.Dir(absPath)
+	if parent == absPath {
+		parent = ""
+	}
+	return BrowseResult{Path: absPath, Parent: parent, Entries: dirs, Drives: drives, Sep: `\`}, nil
 }

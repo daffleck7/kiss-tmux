@@ -8,6 +8,10 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Machine tabs -->
+  <div id="host-tabs" class="hidden"></div>
+  <div id="host-banner" class="hidden"></div>
+
   <!-- Grid Mode -->
   <div id="grid-view">
     <div id="grid-container"></div>
@@ -22,7 +26,7 @@
   <!-- New Session Dialog -->
   <div id="dialog-overlay" class="hidden">
     <div id="new-session-dialog">
-      <h3>New Session</h3>
+      <h3 id="dialog-title">New Session</h3>
       <label>Name <input type="text" id="dialog-name" placeholder="optional"></label>
       <label>Working Directory
         <div class="cwd-row">
@@ -43,7 +47,7 @@
           <button type="button" id="dir-browser-select">Select</button>
         </div>
       </div>
-      <label>Command <input type="text" id="dialog-cmd" value="claude --dangerously-skip-permissions"></label>
+      <label id="dialog-cmd-row">Command <input type="text" id="dialog-cmd" value="claude --dangerously-skip-permissions"></label>
       <div class="dialog-buttons">
         <button id="dialog-cancel">Cancel</button>
         <button id="dialog-create">Create</button>
@@ -54,7 +58,10 @@
   <!-- Context Menu -->
   <div id="context-menu" class="hidden">
     <div class="menu-item" data-action="rename">Rename</div>
-    <div class="menu-item" data-action="kill">Kill</div>
+    <div class="menu-item local-only" data-action="kill">Kill</div>
+    <div class="menu-item remote-only" data-action="reconnect">Reconnect</div>
+    <div class="menu-item remote-only" data-action="disconnect">Disconnect</div>
+    <div class="menu-item remote-only danger" data-action="end">End on remote…</div>
     <div class="menu-item" data-action="remove">Remove</div>
   </div>
 

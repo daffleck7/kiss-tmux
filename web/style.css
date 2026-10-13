@@ -7,6 +7,8 @@
   --accent: #e94560;
   --green: #4ecca3;
   --grey: #555;
+  --host-color: #3b82f6;
+  --yellow: #f5c542;
 }
 
 * {
@@ -21,6 +23,8 @@ body {
   font-family: 'Segoe UI', system-ui, sans-serif;
   height: 100vh;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .hidden {
@@ -29,7 +33,8 @@ body {
 
 /* Grid Mode */
 #grid-view {
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   padding: 8px;
 }
 
@@ -44,6 +49,7 @@ body {
 .grid-cell {
   background: var(--surface);
   border: 1px solid var(--border);
+  border-top: 3px solid var(--host-color);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
@@ -52,7 +58,7 @@ body {
 }
 
 .grid-cell:hover {
-  border-color: var(--accent);
+  border-color: var(--host-color);
 }
 
 .grid-cell-header {
@@ -73,6 +79,10 @@ body {
 
 .dot.running { background: var(--green); }
 .dot.stopped { background: var(--grey); }
+
+.tab-dot.running { background: var(--green); }
+.tab-dot.stopped { background: var(--grey); }
+.tab-dot.reconnecting { background: var(--yellow); }
 
 .grid-cell-header .name {
   flex: 1;
@@ -100,20 +110,21 @@ body {
 }
 
 .grid-cell-new:hover {
-  border-color: var(--accent);
+  border-color: var(--host-color);
   color: var(--text);
 }
 
 /* Focus Mode */
 #focus-view {
   display: flex;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
 }
 
 #sidebar {
   width: 72px;
   background: var(--surface);
-  border-right: 1px solid var(--border);
+  border-right: 3px solid var(--host-color);
   display: flex;
   flex-direction: column;
   padding: 4px 0;
@@ -167,7 +178,7 @@ body {
 }
 
 .sidebar-tab.active {
-  background: var(--accent);
+  background: var(--host-color);
   color: white;
 }
 
@@ -194,6 +205,26 @@ body {
 #focus-terminal {
   flex: 1;
   overflow: hidden;
+  border-top: 3px solid var(--host-color);
+  display: flex;
+  flex-direction: column;
+}
+
+.focus-term-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.disconnected-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--host-color);
+  flex-shrink: 0;
 }
 
 /* New Session Dialog */
@@ -217,7 +248,7 @@ body {
 
 #new-session-dialog h3 {
   margin-bottom: 16px;
-  color: var(--accent);
+  color: var(--host-color);
 }
 
 #new-session-dialog label {
@@ -242,7 +273,7 @@ body {
 
 #new-session-dialog input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--host-color);
 }
 
 .dialog-buttons {
@@ -267,7 +298,7 @@ body {
 }
 
 #dialog-create {
-  background: var(--accent);
+  background: var(--host-color);
   color: white;
 }
 
@@ -391,7 +422,7 @@ body {
 }
 
 #dir-browser-select {
-  background: var(--accent);
+  background: var(--host-color);
   color: white;
 }
 
@@ -431,4 +462,101 @@ body {
 /* xterm.js overrides */
 .xterm {
   height: 100%;
+}
+
+/* Machine tabs */
+#host-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.host-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 4px 4px 0 0;
+  cursor: pointer;
+}
+
+.host-tab:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.04);
+}
+
+.host-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--tab-color);
+  background: rgba(255,255,255,0.06);
+}
+
+.host-tab-alert {
+  margin-left: 4px;
+  font-weight: bold;
+  color: var(--accent);
+}
+
+.host-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--tab-color);
+}
+
+/* Host error banner */
+#host-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(233, 69, 96, 0.15);
+  border-bottom: 1px solid var(--accent);
+  flex-shrink: 0;
+}
+
+#host-banner span {
+  flex: 1;
+}
+
+#host-banner button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+/* Remote session state */
+.dot.reconnecting { background: var(--yellow); }
+
+.state-badge {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.reconnect-btn {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--host-color);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.menu-item.danger {
+  color: var(--accent);
 }
