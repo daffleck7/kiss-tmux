@@ -215,7 +215,7 @@ function Invoke-Swap {
 
 switch ($Phase) {
     'snapshot' {
-        $entries = Get-Snapshot
+        $entries = @(Get-Snapshot)
         Write-Host "Found $($entries.Count) Claude conversation(s) in KISS-TMUX:"
         $entries | Format-Table name, status, cwd, cmd -AutoSize -Wrap | Out-String -Width 200 | Write-Host
         if (Test-Path $NewExe) { Write-Host "New build to install: $NewExe" }
