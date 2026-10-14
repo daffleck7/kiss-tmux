@@ -143,8 +143,8 @@ that was running in it, using `claude --resume <id>`. If `kiss-tmux-new.exe` exi
 
 ```powershell
 go build -o kiss-tmux-new.exe .          # optional: stage a new build
-powershell -ExecutionPolicy Bypass -File scriptsestart-and-resume.ps1 -DryRun   # preview
-powershell -ExecutionPolicy Bypass -File scriptsestart-and-resume.ps1
+powershell -ExecutionPolicy Bypass -File scripts\restart-and-resume.ps1 -DryRun   # preview
+powershell -ExecutionPolicy Bypass -File scripts\restart-and-resume.ps1
 ```
 
 Run it from a normal PowerShell window. The restart continues in its own window, so it

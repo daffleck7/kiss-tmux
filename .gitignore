@@ -8,3 +8,4 @@ dump_sessions.go
 # Local icon files; ignored so `git clean` (without -x) leaves them alone.
 kiss-tmux.ico
 kiss-tmux.png
+*.syso
