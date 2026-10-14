@@ -92,10 +92,18 @@ func quoteRemotePath(p string) string {
 
 // attachArgs builds ssh arguments that start or reattach a cs session.
 // name must satisfy validRemoteName.
-func attachArgs(alias, name, cwd string) []string {
+// A non-empty cmd replaces cs's default command when the session is created; cs ignores
+// it when reattaching. It needs a folder argument before it, so an empty cwd becomes ".".
+func attachArgs(alias, name, cwd, cmd string) []string {
 	remoteCmd := "cs " + name
+	if cmd != "" && cwd == "" {
+		cwd = "."
+	}
 	if cwd != "" {
 		remoteCmd += " " + quoteRemotePath(cwd)
+	}
+	if cmd != "" {
+		remoteCmd += " " + shellQuote(cmd)
 	}
 	return []string{
 		"-t", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",

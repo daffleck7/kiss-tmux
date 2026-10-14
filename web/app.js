@@ -607,7 +607,6 @@ function showNewSessionDialog() {
   document.getElementById('dialog-name').placeholder = remote ? 'optional, e.g. api-work' : 'optional';
   document.getElementById('dialog-cwd').value = remote ? (host.default_cwd || '') : DEFAULT_CWD;
   document.getElementById('dialog-cmd').value = 'claude --dangerously-skip-permissions';
-  document.getElementById('dialog-cmd-row').classList.toggle('hidden', remote);
   document.getElementById('dialog-name').focus();
 }
 
@@ -619,13 +618,12 @@ function hideNewSessionDialog() {
 function createSessionFromDialog() {
   var name = document.getElementById('dialog-name').value.trim();
   var cwd = document.getElementById('dialog-cwd').value.trim();
-  var msg = { type: 'spawn', cwd: cwd, name: name };
-  if (dialogHost) {
-    msg.host = dialogHost;
-  } else {
-    msg.cmd = document.getElementById('dialog-cmd').value.trim() ||
-      'claude --dangerously-skip-permissions';
-  }
+  var msg = {
+    type: 'spawn', cwd: cwd, name: name,
+    cmd: document.getElementById('dialog-cmd').value.trim() ||
+      'claude --dangerously-skip-permissions'
+  };
+  if (dialogHost) msg.host = dialogHost;
   send(msg);
   hideNewSessionDialog();
 }

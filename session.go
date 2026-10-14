@@ -438,7 +438,8 @@ var (
 )
 
 // SpawnRemote opens a new cs session called name (slugified) on hostID in cwd.
-func (m *Manager) SpawnRemote(hostID, name, cwd string, cols, rows uint16) (string, error) {
+// A non-empty cmd is what the new session runs instead of cs's default.
+func (m *Manager) SpawnRemote(hostID, name, cwd, cmd string, cols, rows uint16) (string, error) {
 	host, ok := m.hosts[hostID]
 	if !ok {
 		return "", fmt.Errorf("unknown host %q", hostID)
@@ -447,12 +448,13 @@ func (m *Manager) SpawnRemote(hostID, name, cwd string, cols, rows uint16) (stri
 	if strings.TrimSpace(cwd) == "" {
 		cwd = host.DefaultCwd
 	}
-	return m.spawnRemoteSession(host, slugRemoteName(name), displayName, cwd, cols, rows)
+	return m.spawnRemoteSession(host, slugRemoteName(name), displayName, cwd,
+		strings.TrimSpace(cmd), cols, rows)
 }
 
 // spawnRemoteSession attaches to (or creates) remoteName on host and registers it.
 // An empty remoteName gets a generated one.
-func (m *Manager) spawnRemoteSession(host HostConfig, remoteName, displayName, cwd string, cols, rows uint16) (string, error) {
+func (m *Manager) spawnRemoteSession(host HostConfig, remoteName, displayName, cwd, cmd string, cols, rows uint16) (string, error) {
 	m.remoteMu.Lock()
 	defer m.remoteMu.Unlock()
 
@@ -492,7 +494,7 @@ func (m *Manager) spawnRemoteSession(host HostConfig, remoteName, displayName, c
 		rows:       rows,
 		backoff:    newBackoff(),
 	}
-	if err := m.attach(s, host, cwd, 0); err != nil {
+	if err := m.attach(s, host, cwd, cmd, 0); err != nil {
 		return "", err
 	}
 	m.store(s)
@@ -514,14 +516,14 @@ func (m *Manager) findRemote(hostID, remoteName string) *Session {
 	return found
 }
 
-// attach starts an ssh PTY for s and begins reading. cwd is only used for new sessions.
-// gen is the reconnect generation the caller acted on; a stale gen discards the PTY.
-func (m *Manager) attach(s *Session, host HostConfig, cwd string, gen int) error {
+// attach starts an ssh PTY for s and begins reading. cwd and cmd are only used for new
+// sessions. gen is the reconnect generation the caller acted on; a stale gen discards the PTY.
+func (m *Manager) attach(s *Session, host HostConfig, cwd, cmd string, gen int) error {
 	s.mu.Lock()
 	cols, rows := s.cols, s.rows
 	s.mu.Unlock()
 
-	cmdline := windowsCommandLine(sshExecutable(), attachArgs(host.SSH, s.RemoteName, cwd))
+	cmdline := windowsCommandLine(sshExecutable(), attachArgs(host.SSH, s.RemoteName, cwd, cmd))
 	p, err := m.startPty(cmdline, "", cols, rows)
 	if err != nil {
 		log.Printf("attach %s on %s: %v", s.RemoteName, host.ID, err)
@@ -607,7 +609,7 @@ func (m *Manager) reconnectLoop(s *Session, gen int, immediate bool) {
 		}
 		// If the session died after `screen -ls`, `cs <name>` creates a fresh one in the
 		// default folder. Accepted; a real fix needs an attach-only mode in cs.
-		if err := m.attach(s, host, "", gen); err != nil {
+		if err := m.attach(s, host, "", "", gen); err != nil {
 			continue
 		}
 		m.broadcastSessions()
@@ -782,7 +784,7 @@ func (m *Manager) Discover(hostID string) {
 		}
 		// Attach without a folder. If the session died after `screen -ls`, cs creates a
 		// fresh one in the default folder; accepted (a real fix needs attach-only cs).
-		_, err := m.spawnRemoteSession(host, name, name, "", 80, 24)
+		_, err := m.spawnRemoteSession(host, name, name, "", "", 80, 24)
 		switch {
 		case err == nil, errors.Is(err, errSessionOpen):
 			continue

@@ -80,6 +80,7 @@ remote's non-interactive PATH (e.g. set in `~/.zshenv`):
 | Command | Effect |
 |---------|--------|
 | `cs <name> <dir>` | Start session `<name>` in `<dir>`, or reattach if it exists |
+| `cs <name> <dir> <command>` | Same, but the new session runs `<command>` instead of `claude` |
 | `cs <name>` | Reattach |
 | `cs -k <name>` | End the session |
 
@@ -118,6 +119,9 @@ remote's non-interactive PATH (e.g. set in `~/.zshenv`):
   reappears on the next discovery.
 - The folder browser in the New Session dialog lists the remote machine's folders. An empty
   folder uses the host's `default_cwd`.
+- The **Command** box works on remote machines too (default
+  `claude --dangerously-skip-permissions`). It only applies when the session is created;
+  reattaching to an existing session keeps whatever it is already running.
 - In focus view, a disconnected remote session shows a **Reconnect** bar above the terminal.
 - Up to 8 sessions per machine.
 - Session names allow letters, digits, `-` and `_`, up to 32 characters (other characters

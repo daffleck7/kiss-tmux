@@ -73,7 +73,7 @@ func TestSlugRemoteName(t *testing.T) {
 }
 
 func TestAttachArgs(t *testing.T) {
-	got := attachArgs("mac", "myapp", "~/Desktop/My Projects")
+	got := attachArgs("mac", "myapp", "~/Desktop/My Projects", "")
 	want := []string{
 		"-t", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
 		"mac", `cs myapp ~/'Desktop/My Projects'`,
@@ -81,9 +81,17 @@ func TestAttachArgs(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("attachArgs = %q\nwant %q", got, want)
 	}
-	reattach := attachArgs("mac", "myapp", "")
+	reattach := attachArgs("mac", "myapp", "", "")
 	if reattach[len(reattach)-1] != "cs myapp" {
 		t.Errorf("reattach remote command = %q", reattach[len(reattach)-1])
+	}
+	withCmd := attachArgs("mac", "myapp", "~/code", "claude --dangerously-skip-permissions")
+	if got := withCmd[len(withCmd)-1]; got != `cs myapp ~/'code' 'claude --dangerously-skip-permissions'` {
+		t.Errorf("command remote command = %q", got)
+	}
+	noCwd := attachArgs("mac", "myapp", "", "it's")
+	if got := noCwd[len(noCwd)-1]; got != `cs myapp '.' 'it'\''s'` {
+		t.Errorf("command without cwd = %q", got)
 	}
 }
 

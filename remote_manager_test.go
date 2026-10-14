@@ -196,7 +196,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestSpawnRemoteStartsSSH(t *testing.T) {
 	m, env := newRemoteTestManager(t)
-	id, err := m.SpawnRemote("mac", "My App", "~/Desktop/My Projects", 100, 30)
+	id, err := m.SpawnRemote("mac", "My App", "~/Desktop/My Projects", "claude -c", 100, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestSpawnRemoteStartsSSH(t *testing.T) {
 		t.Fatalf("starts = %d, want 1", env.startCount())
 	}
 	cmdline := env.started[0]
-	if !strings.Contains(cmdline, `cs My-App ~/'Desktop/My Projects'`) {
+	if !strings.Contains(cmdline, `cs My-App ~/'Desktop/My Projects' 'claude -c'`) {
 		t.Errorf("cmdline = %s", cmdline)
 	}
 	list := m.List()
@@ -216,7 +216,7 @@ func TestSpawnRemoteStartsSSH(t *testing.T) {
 
 func TestSpawnRemoteDefaultsName(t *testing.T) {
 	m, env := newRemoteTestManager(t)
-	id, err := m.SpawnRemote("mac", "", "", 0, 0)
+	id, err := m.SpawnRemote("mac", "", "", "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,13 +227,13 @@ func TestSpawnRemoteDefaultsName(t *testing.T) {
 
 func TestSpawnRemoteRejectsUnknownHostAndDuplicates(t *testing.T) {
 	m, _ := newRemoteTestManager(t)
-	if _, err := m.SpawnRemote("nope", "a", "", 80, 24); err == nil {
+	if _, err := m.SpawnRemote("nope", "a", "", "", 80, 24); err == nil {
 		t.Error("expected unknown host error")
 	}
-	if _, err := m.SpawnRemote("mac", "a", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "a", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SpawnRemote("mac", "a", "", 80, 24); err == nil {
+	if _, err := m.SpawnRemote("mac", "a", "", "", 80, 24); err == nil {
 		t.Error("expected duplicate session error")
 	}
 }
@@ -241,10 +241,10 @@ func TestSpawnRemoteRejectsUnknownHostAndDuplicates(t *testing.T) {
 func TestSessionCapIsPerMachine(t *testing.T) {
 	m, _ := newRemoteTestManager(t)
 	m.maxSessions = 1
-	if _, err := m.SpawnRemote("mac", "a", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "a", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SpawnRemote("mac", "b", "", 80, 24); err == nil {
+	if _, err := m.SpawnRemote("mac", "b", "", "", 80, 24); err == nil {
 		t.Error("expected max sessions error on mac")
 	}
 	if got := m.hostSessionCount(""); got != 0 {
@@ -255,7 +255,7 @@ func TestSessionCapIsPerMachine(t *testing.T) {
 func TestDropReconnectsWhenSessionStillExists(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestDropReconnectsWhenSessionStillExists(t *testing.T) {
 func TestDropMarksEndedWhenSessionGone(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	env.listResults = []listResult{{out: "No Sockets found in /tmp.\n"}}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	env.pty(0).Close()
 	waitFor(t, "ended", func() bool { return sessionState(m, id) == stateEnded })
 	if env.startCount() != 1 {
@@ -288,7 +288,7 @@ func TestDropRetriesWhileNetworkDown(t *testing.T) {
 		{err: errors.New("connect timed out")},
 		{out: screenLs("main")},
 	}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	env.pty(0).Close()
 	waitFor(t, "running after retries", func() bool {
 		return env.startCount() == 2 && sessionState(m, id) == stateRunning
@@ -304,7 +304,7 @@ func TestDropRetriesWhileNetworkDown(t *testing.T) {
 func TestDisconnectStopsWithoutReconnect(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	m.Disconnect(id)
 	waitFor(t, "disconnected", func() bool { return sessionState(m, id) == stateDisconnected })
 	time.Sleep(50 * time.Millisecond)
@@ -318,7 +318,7 @@ func TestDisconnectStopsWithoutReconnect(t *testing.T) {
 
 func TestKillOnRemoteDisconnects(t *testing.T) {
 	m, env := newRemoteTestManager(t)
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	m.Kill(id)
 	waitFor(t, "disconnected", func() bool { return sessionState(m, id) == stateDisconnected })
 	for _, call := range env.sshCalls {
@@ -331,7 +331,7 @@ func TestKillOnRemoteDisconnects(t *testing.T) {
 func TestEndRunsCsKill(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	m.End(id)
 	waitFor(t, "ended", func() bool { return sessionState(m, id) == stateEnded })
 	env.mu.Lock()
@@ -358,7 +358,7 @@ func TestEndFailureKeepsSessionRunning(t *testing.T) {
 	}
 	env.endErr = errors.New("permission denied")
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	m.End(id)
 	waitFor(t, "error broadcast", func() bool {
 		mu.Lock()
@@ -378,7 +378,7 @@ func TestEndFailureKeepsSessionRunning(t *testing.T) {
 func TestRemoveStopsReconnect(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, _ := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, _ := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	m.Remove(id)
 	time.Sleep(50 * time.Millisecond)
 	if env.startCount() != 1 {
@@ -391,7 +391,7 @@ func TestRemoveStopsReconnect(t *testing.T) {
 
 func TestDiscoverAdoptsNewSessionsOnly(t *testing.T) {
 	m, env := newRemoteTestManager(t)
-	if _, err := m.SpawnRemote("mac", "main", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "main", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	env.listResults = []listResult{{out: screenLs("main", "agent")}}
@@ -472,7 +472,7 @@ func TestEndFailureAfterDropRevertsToDisconnected(t *testing.T) {
 	gate := make(chan struct{})
 	env.endGate = gate
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,14 +501,14 @@ func TestEndFailureAfterDropRevertsToDisconnected(t *testing.T) {
 func TestSpawnRemoteSentinelErrors(t *testing.T) {
 	m, _ := newRemoteTestManager(t)
 	m.maxSessions = 1
-	if _, err := m.SpawnRemote("mac", "a", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "a", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.SpawnRemote("mac", "a", "", 80, 24); !errors.Is(err, errMaxSessions) {
+	if _, err := m.SpawnRemote("mac", "a", "", "", 80, 24); !errors.Is(err, errMaxSessions) {
 		t.Errorf("err = %v, want errMaxSessions", err)
 	}
 	m.maxSessions = 8
-	_, err := m.SpawnRemote("mac", "a", "", 80, 24)
+	_, err := m.SpawnRemote("mac", "a", "", "", 80, 24)
 	if !errors.Is(err, errSessionOpen) || !strings.Contains(err.Error(), `"a"`) {
 		t.Errorf("err = %v, want errSessionOpen naming a", err)
 	}
@@ -536,7 +536,7 @@ func TestDiscoverStopsAtMaxSessions(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	errs := collectErrors(m)
 	m.maxSessions = 2
-	if _, err := m.SpawnRemote("mac", "x", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "x", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	env.listResults = []listResult{{out: screenLs("x", "a", "b", "c")}}
@@ -557,7 +557,7 @@ func TestStaleAttachAfterDisconnectIsDiscarded(t *testing.T) {
 	env.startGate = gate
 	env.startBlocked = blocked
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +592,7 @@ func TestStaleLoopDoesNotAdvanceBackoff(t *testing.T) {
 	env.listGate = gate
 	env.listBlocked = blocked
 	env.listResults = []listResult{{err: errors.New("connect timed out")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func csKillCalls(env *fakeEnv) []string {
 
 func TestEndSkipsCsKillWhenSessionNotListed(t *testing.T) {
 	m, env := newRemoteTestManager(t)
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ func TestEndSkipsCsKillWhenSessionNotListed(t *testing.T) {
 func TestEndListFailureKeepsSessionAndSkipsCsKill(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	errs := collectErrors(m)
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +702,7 @@ func TestEndWhileReconnectingDoesNotReattach(t *testing.T) {
 	listBlocked := make(chan struct{})
 	endGate := make(chan struct{})
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestEndFailureWhileReconnectingShowsDisconnected(t *testing.T) {
 	listGate := make(chan struct{})
 	listBlocked := make(chan struct{})
 	env.listResults = []listResult{{out: screenLs("main")}}
-	id, err := m.SpawnRemote("mac", "main", "", 80, 24)
+	id, err := m.SpawnRemote("mac", "main", "", "", 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,7 +797,7 @@ func TestHostErrorsReturnsCopy(t *testing.T) {
 func TestSpawnRemoteEmptyCwdUsesHostDefault(t *testing.T) {
 	m, env := newRemoteTestManager(t)
 	m.SetHosts([]HostConfig{{ID: "mac", Label: "Mac", SSH: "mac", DefaultCwd: "~/Projects"}})
-	if _, err := m.SpawnRemote("mac", "api", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "api", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(env.started[0], `cs api ~/'Projects'`) {
@@ -807,7 +807,7 @@ func TestSpawnRemoteEmptyCwdUsesHostDefault(t *testing.T) {
 
 func TestListIncludesRemoteName(t *testing.T) {
 	m, _ := newRemoteTestManager(t)
-	if _, err := m.SpawnRemote("mac", "API work", "", 80, 24); err != nil {
+	if _, err := m.SpawnRemote("mac", "API work", "", "", 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	list := m.List()

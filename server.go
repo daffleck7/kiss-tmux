@@ -161,7 +161,7 @@ func (c *Client) readPump(hub *Hub, mgr *Manager) {
 			var id string
 			var err error
 			if msg.Host != "" {
-				id, err = mgr.SpawnRemote(msg.Host, msg.Name, msg.Cwd, msg.Cols, msg.Rows)
+				id, err = mgr.SpawnRemote(msg.Host, msg.Name, msg.Cwd, msg.Cmd, msg.Cols, msg.Rows)
 			} else {
 				id, err = mgr.Spawn(msg.Cmd, msg.Cwd, msg.Name, msg.Cols, msg.Rows)
 			}
