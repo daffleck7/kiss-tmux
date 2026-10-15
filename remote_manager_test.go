@@ -43,7 +43,7 @@ type fakeEnv struct {
 	started  []string
 	ptys     []*fakePty
 	sshCalls [][]string
-	// listResults are consumed in order by `screen -ls` calls; the last one repeats.
+	// listResults are consumed in order by `cs --ls` calls; the last one repeats.
 	listResults []listResult
 	endErr      error
 	browseOut   string
@@ -51,7 +51,7 @@ type fakeEnv struct {
 
 	// endGate, when non-nil, blocks `cs -k` calls until it is closed.
 	endGate chan struct{}
-	// listGate, when non-nil, blocks `screen -ls` calls until it is closed;
+	// listGate, when non-nil, blocks `cs --ls` calls until it is closed;
 	// listBlocked (if non-nil) is closed when the first call starts waiting.
 	listGate    chan struct{}
 	listBlocked chan struct{}
@@ -101,7 +101,7 @@ func (e *fakeEnv) runSSH(ctx context.Context, args []string) ([]byte, error) {
 	e.sshCalls = append(e.sshCalls, args)
 	var gate chan struct{}
 	switch {
-	case remote == "screen -ls":
+	case remote == "cs --ls":
 		gate = e.listGate
 		if gate != nil && e.listBlocked != nil {
 			close(e.listBlocked)
@@ -118,7 +118,7 @@ func (e *fakeEnv) runSSH(ctx context.Context, args []string) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	switch {
-	case remote == "screen -ls":
+	case remote == "cs --ls":
 		if len(e.listResults) == 0 {
 			return nil, nil
 		}

@@ -116,9 +116,10 @@ func batchArgs(alias, remoteCmd string) []string {
 	return []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", alias, remoteCmd}
 }
 
-// listArgs builds ssh arguments that list screen sessions.
+// listArgs builds ssh arguments that list cs sessions: `screen -ls` output plus a
+// "<tab>0.cs-<name><tab>(Saved)" line for each lost session cs can resume.
 func listArgs(alias string) []string {
-	return batchArgs(alias, "screen -ls")
+	return batchArgs(alias, "cs --ls")
 }
 
 // endArgs builds ssh arguments that end a cs session.

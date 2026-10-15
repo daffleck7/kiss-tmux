@@ -52,7 +52,7 @@ kiss-tmux [flags]
 - **Copy/paste** — `Ctrl+V` / `Ctrl+Shift+V` / right-click paste; `Ctrl+Shift+C` copy
 - **Context menu** — right-click a session header: **Rename / Kill / Remove** for local sessions,
   **Rename / Disconnect / End / Remove** for remote ones (plus **Reconnect** when disconnected)
-- **Inline rename** — double-click a session name in the grid
+- **Rename** — right-click a session (grid header or sidebar tab) and choose Rename
 - **Live reconnect** — refresh the browser and sessions replay from a 64KB ring buffer
 - **Multiple browser tabs** — all tabs stay in sync via WebSocket broadcast
 - **Default command** — `claude --dangerously-skip-permissions` (customizable per-session)
@@ -82,9 +82,12 @@ remote's non-interactive PATH (e.g. set in `~/.zshenv`):
 | `cs <name> <dir>` | Start session `<name>` in `<dir>`, or reattach if it exists |
 | `cs <name> <dir> <command>` | Same, but the new session runs `<command>` instead of `claude` |
 | `cs <name>` | Reattach |
-| `cs -k <name>` | End the session |
+| `cs -k <name>` | End the session (it won't be resumed) |
+| `cs --ls` | `screen -ls` output, plus a `<tab>0.cs-<name><tab>(Saved)` line for each session lost in a reboot that `cs <name>` can resume |
 
-`cs` must name its screen sessions `cs-<name>`; discovery reads `screen -ls`.
+`cs` must name its screen sessions `cs-<name>`; discovery reads `cs --ls`.
+Use GNU screen 5 or later (e.g. `brew install screen`): screen 4 drops the SGR mouse mode
+that Claude's fullscreen UI uses for scrolling.
 
 **Setup:**
 
@@ -129,8 +132,10 @@ remote's non-interactive PATH (e.g. set in `~/.zshenv`):
   a different session that shares a prefix.
 - **Rename** is display-only: the `cs` name stays the same, and the new name is lost when
   KISS-TMUX restarts.
-- Remote sessions survive KISS-TMUX restarts (they live in `screen`), but a reboot of the
-  remote machine ends them all.
+- Remote sessions survive KISS-TMUX restarts (they live in `screen`). If the remote machine
+  reboots or loses power, `cs` remembers each session's folder, command and Claude
+  conversation, and KISS-TMUX resumes them automatically once the machine is back.
+  **End** forgets a session for good.
 - Noticing a dropped link can take up to ~90s (SSH keepalive: 3 missed 30s probes).
 - If Claude on the Mac asks you to `/login`, that's because the macOS Keychain can be locked
   over SSH; run `/login` in that session.

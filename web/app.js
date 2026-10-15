@@ -428,10 +428,6 @@ function renderGrid() {
     var name = document.createElement('span');
     name.className = 'name';
     name.textContent = s.name;
-    name.addEventListener('dblclick', function(e) {
-      e.stopPropagation();
-      startRename(s.id, name);
-    });
     header.appendChild(name);
 
     var st = sessionState(s);
@@ -772,35 +768,17 @@ function hideContextMenu() {
   contextMenuTarget = null;
 }
 
-// Rename
-function startRename(sessionId, nameEl) {
-  var session = sessions.find(function(s) { return s.id === sessionId; });
+// Rename. A prompt works the same in grid and focus views and can't be wiped out by a
+// re-render while typing.
+function renameSession(sessionId) {
+  var session = findSession(sessionId);
   if (!session) return;
-
-  var input = document.createElement('input');
-  input.type = 'text';
-  input.value = session.name;
-  input.style.cssText = 'background:var(--bg);border:1px solid var(--accent);color:var(--text);font-size:12px;padding:0 4px;width:100%;border-radius:2px;';
-
-  nameEl.textContent = '';
-  nameEl.appendChild(input);
-  input.focus();
-  input.select();
-
-  function finish() {
-    var newName = input.value.trim();
-    if (newName && newName !== session.name) {
-      send({ type: 'rename', session: sessionId, name: newName });
-    }
-    nameEl.textContent = newName || session.name;
+  var newName = window.prompt('Rename session', session.name);
+  if (newName === null) return;
+  newName = newName.trim();
+  if (newName && newName !== session.name) {
+    send({ type: 'rename', session: sessionId, name: newName });
   }
-
-  input.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') { finish(); }
-    if (e.key === 'Escape') { nameEl.textContent = session.name; }
-    e.stopPropagation();
-  });
-  input.addEventListener('blur', finish);
 }
 
 // Escape key — only for closing dialog (doesn't conflict with terminal)
@@ -945,10 +923,7 @@ function init() {
         }
       }
       if (action === 'rename' && contextMenuTarget) {
-        var nameEl = document.querySelector('[data-session="' + contextMenuTarget + '"] .name');
-        if (nameEl) {
-          startRename(contextMenuTarget, nameEl);
-        }
+        renameSession(contextMenuTarget);
       }
       hideContextMenu();
     });

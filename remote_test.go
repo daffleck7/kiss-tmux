@@ -96,7 +96,7 @@ func TestAttachArgs(t *testing.T) {
 }
 
 func TestBatchArgs(t *testing.T) {
-	if got := listArgs("mac"); got[len(got)-1] != "screen -ls" || got[0] != "-T" {
+	if got := listArgs("mac"); got[len(got)-1] != "cs --ls" || got[0] != "-T" {
 		t.Errorf("listArgs = %q", got)
 	}
 	if got := endArgs("mac", "myapp"); got[len(got)-1] != "cs -k myapp" {
@@ -132,9 +132,10 @@ func TestParseScreenList(t *testing.T) {
 		"\t777.cs-zombie\t(Dead ???)\n" +
 		"\t888.cs-bad.name\t(Detached)\n" +
 		"\t999.cs--flag\t(Detached)\n" +
-		"3 Sockets in /var/folders/xx/.screen.\n"
+		"3 Sockets in /var/folders/xx/.screen.\n" +
+		"\t0.cs-resumable\t(Saved)\n" // cs --ls appends lost sessions it can resume
 	got, skipped := parseScreenList(out)
-	want := []string{"main", "my-app", "old"}
+	want := []string{"main", "my-app", "old", "resumable"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseScreenList = %q, want %q", got, want)
 	}
