@@ -1,0 +1,151 @@
+#!/bin/zsh
+# cs — start or reattach a persistent Claude Code session (survives SSH disconnects and reboots).
+#
+#   cs                  list sessions (or start "main" in ~ if none exist)
+#   cs <name>           reattach to <name>; if it was lost (reboot, power cut), resume its
+#                       Claude conversation in its folder; otherwise start it in the current folder
+#   cs <name> <folder>  start <name> in <folder> (reattaches if it already exists)
+#   cs <name> <folder> <command>  same, but run <command> instead of claude
+#   cs -k <name>        end a session for good (it won't be resumed)
+#   cs --ls             screen -ls, plus a "<tab>0.cs-<name><tab>(Saved)" line per lost session
+#   cs --saved          names of lost sessions that can be resumed
+#
+# Several windows can share one session (screen -x). Detach without stopping Claude: Ctrl+A, then D.
+#
+# Each session's folder, command and Claude conversation ID are kept in ~/.local/state/cs/<name>
+# until the session is ended (cs -k) or closed after its command exits, so a session lost to a
+# reboot can be resumed.
+#
+# Uses Homebrew's screen 5 when installed (screen 4 drops the SGR mouse mode Claude's
+# fullscreen UI needs for scrolling). /usr/bin/screen stays the system default.
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export LANG="${LANG:-en_US.UTF-8}"
+
+SCREEN=/opt/homebrew/opt/screen/bin/screen
+[[ -x $SCREEN ]] || SCREEN=/usr/bin/screen
+# Sessions started before the switch to screen 5 still run under the system screen, which
+# can't see screen 5's sessions (and vice versa), so cs checks both until they're gone.
+SCREENS=($SCREEN)
+[[ $SCREEN != /usr/bin/screen && -x /usr/bin/screen ]] && SCREENS+=(/usr/bin/screen)
+STATE_DIR="$HOME/.local/state/cs"
+
+valid_name() { [[ $1 =~ '^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$' ]]; }
+
+# Finds session $1: sets FOUND_SCREEN to the screen binary running it and FOUND_ID to its
+# exact pid.name (screen itself matches -S/-r names by prefix). Fails if it isn't running.
+find_session() {
+  local bin id
+  for bin in $SCREENS; do
+    id=$($bin -ls | grep -oE "[0-9]+\.cs-$1[[:space:]]" | head -1 | tr -d '[:space:]')
+    [[ -n $id ]] && { FOUND_SCREEN=$bin; FOUND_ID=$id; return 0; }
+  done
+  return 1
+}
+
+running_names() {
+  local bin
+  for bin in $SCREENS; do $bin -ls; done | grep -oE '[0-9]+\.cs-[^[:space:]]+' | sed 's/^[0-9]*\.cs-//'
+}
+
+saved_names() {
+  local running=" $(running_names | tr '\n' ' ') " file
+  for file in $STATE_DIR/*(N); do
+    [[ $running == *" ${file:t} "* ]] || print -r -- ${file:t}
+  done
+}
+
+# launch <name> <folder> <command> <conversation-id> <resume:0|1>
+# Records the session, then runs it in screen. The record is removed only when the user
+# closes the "Claude exited" prompt; a reboot, power cut or kill leaves it so the session resumes.
+launch() {
+  local name=$1 dir=$2 cmd=$3 conv=$4 resume=$5
+  local state="$STATE_DIR/$name" run=$cmd
+  if [[ -n $conv ]]; then
+    (( resume )) && run="$cmd --resume $conv" || run="$cmd --session-id $conv"
+  fi
+  mkdir -p $STATE_DIR
+  print -r -l -- "$dir" "$cmd" "$conv" > $state
+  cd $dir || exit 1
+  exec $SCREEN -U -S "cs-$name" -h 10000 zsh -lc \
+    "$run"'; echo; echo "Claude exited — press Enter to close."; read && rm -f '"${(q)state}"
+}
+
+# start_new <name> <folder> <command>: a fresh session. Plain claude commands get a
+# conversation ID so they can be resumed; commands that already resume keep theirs.
+start_new() {
+  local name=$1 dir=$2 cmd=$3 conv="" i
+  local -a words=(${(z)cmd}) kept=()
+  if [[ ${words[1]} == claude ]]; then
+    for (( i = 1; i <= $#words; i++ )); do
+      case ${words[i]} in
+        -r|--resume)
+          if [[ -n ${words[i+1]} && ${words[i+1]} != -* ]]; then conv=${words[i+1]}; (( i++ )); fi ;;
+        -c|--continue|--session-id|-p|--print) kept=(); conv=""; break ;;
+        *) kept+=(${words[i]}) ;;
+      esac
+    done
+    if (( $#kept )); then
+      if [[ -n $conv ]]; then
+        launch $name $dir "${kept[*]}" $conv 1
+      else
+        launch $name $dir $cmd $(uuidgen | tr A-Z a-z) 0
+      fi
+    fi
+  fi
+  launch $name $dir $cmd "" 0
+}
+
+case $1 in
+  -k)
+    [[ -z $2 ]] && { echo "usage: cs -k <name>"; exit 1; }
+    valid_name $2 || { echo "No session named $2"; exit 1; }
+    saved=0
+    [[ -f $STATE_DIR/$2 ]] && { rm -f $STATE_DIR/$2; saved=1; }
+    if find_session $2; then
+      $FOUND_SCREEN -S $FOUND_ID -X quit && echo "Ended $2"
+      exit
+    fi
+    (( saved )) && { echo "Ended $2"; exit 0; }
+    echo "No session named $2"; exit 1 ;;
+  --ls)
+    for bin in $SCREENS; do $bin -ls; done
+    for name in $(saved_names); do printf '\t0.cs-%s\t(Saved)\n' $name; done
+    exit 0 ;;
+  --saved)
+    saved_names; exit 0 ;;
+esac
+
+if [[ -z $1 ]]; then
+  sessions=$(running_names)
+  saved=$(saved_names)
+  if [[ -z $sessions && -z $saved ]]; then
+    set -- main "$HOME"
+  else
+    [[ -n $sessions ]] && { echo "Claude sessions:"; echo "$sessions" | sed 's/^/  /'; }
+    [[ -n $saved ]] && { echo "Lost in a restart (cs <name> resumes):"; echo "$saved" | sed 's/^/  /'; }
+    echo; echo "Reattach with: cs <name>    New one: cs <name> <folder>"
+    exit
+  fi
+fi
+
+name=$1
+valid_name $name || { echo "Invalid name: $name (letters, numbers, - or _)"; exit 1; }
+if find_session $name; then
+  exec $FOUND_SCREEN -U -x $FOUND_ID
+fi
+
+# Lost in a reboot: bring it back where it was, on the same conversation.
+if [[ -z $2 && -f $STATE_DIR/$name ]]; then
+  { IFS= read -r dir; IFS= read -r cmd; IFS= read -r conv; } < $STATE_DIR/$name
+  [[ -d $dir ]] || dir=$HOME
+  if [[ -n $conv ]]; then
+    launch $name $dir $cmd $conv 1
+  fi
+  launch $name $dir $cmd "" 0
+fi
+
+dir="${2:-$PWD}"
+[[ -d "$dir" ]] || { echo "No such folder: $dir"; exit 1; }
+dir=${dir:A}
+start_new $name $dir "${3:-claude}"

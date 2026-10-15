@@ -34,6 +34,20 @@ param(
 $ErrorActionPreference = 'Stop'
 $SessionRegistry = Join-Path $HOME '.claude\sessions'
 
+function Clear-InheritedClaudeEnv {
+    <# Drops CLAUDE* variables inherited from a Claude Code session (e.g. when this script is
+       run by Claude). KISS-TMUX passes its environment on, and those variables make every
+       Claude started in it act as a sub-agent that doesn't save its transcript, so it can't be
+       resumed. Variables set in Windows itself (user or machine) are kept. #>
+    foreach ($name in @(Get-ChildItem Env: | Where-Object Name -like 'CLAUDE*' | ForEach-Object Name)) {
+        $own = @([Environment]::GetEnvironmentVariable($name, 'User'),
+            [Environment]::GetEnvironmentVariable($name, 'Machine')) | Where-Object { $_ }
+        if (-not $own) { Remove-Item "Env:$name" }
+    }
+}
+
+Clear-InheritedClaudeEnv
+
 function Get-KissProcesses {
     <# Returns kiss-tmux.exe processes started from $ExePath. #>
     Get-CimInstance Win32_Process -Filter "Name='kiss-tmux.exe'" |

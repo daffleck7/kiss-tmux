@@ -85,7 +85,8 @@ remote's non-interactive PATH (e.g. set in `~/.zshenv`):
 | `cs -k <name>` | End the session (it won't be resumed) |
 | `cs --ls` | `screen -ls` output, plus a `<tab>0.cs-<name><tab>(Saved)` line for each session lost in a reboot that `cs <name>` can resume |
 
-`cs` must name its screen sessions `cs-<name>`; discovery reads `cs --ls`.
+`cs` must name its screen sessions `cs-<name>`; discovery reads `cs --ls`. A reference
+implementation is in [`scripts/cs`](./scripts/cs) (zsh; copy it to `~/.local/bin/cs`).
 Use GNU screen 5 or later (e.g. `brew install screen`): screen 4 drops the SGR mouse mode
 that Claude's fullscreen UI uses for scrolling.
 
